@@ -1,0 +1,891 @@
+import { generateMockStudents } from '../core/mockStudents';
+import { buildRegistrationSnapshot } from '../core/roster';
+import { buildParticipationWarnings } from '../core/participation';
+import { clearApprovalCandidates, countReviewQueue } from '../core/dashboard';
+import { toClientSafe } from '../core/client-transfer';
+import { affectedSubmissionIds, duplicateCandidates } from '../core/duplicate-selection';
+import { isDevelopmentMockSubmissionId } from '../core/mock-data-lifecycle';
+import { generateMockSubmissions } from './mock-data';
+import { initializeSettings } from './settings-service';
+import { readEventSettings, readFormDesign, readFormRegistry, readRuleSettings } from './settings-repository';
+import { ISSUE_CODES, validateSubmission } from '../core/validation';
+import {
+  assertActionAllowed,
+  nextStatusForAction,
+  type SubmissionAction
+} from '../core/workflow';
+import type {
+  DashboardFilter,
+  GlobalWarning,
+  Submission,
+  SubmissionDetail,
+  SubmissionItem,
+  SubmissionStatus,
+  SubmissionSummary,
+  ValidationResult
+} from '../shared/types';
+import { ITEM_HEADERS, SCRIPT_PROPERTIES, SHEETS, SUBMISSION_HEADERS } from '../shared/constants';
+import { assertAuthorized, assertDevelopmentMode } from './auth-service';
+import {
+  appendApproval,
+  appendChangeHistory,
+  deleteDevelopmentMockRows,
+  deleteDevelopmentMockSubmissionRows,
+  ensureApplicationSheets,
+  ensureMockDataSettings,
+  findSubmission,
+  findRawFormResponseBySubmissionId,
+  findItem,
+  isProductionStudentMasterActive,
+  readIssues,
+  readApprovalHistory,
+  readItems,
+  readMockDataSettings,
+  readMockStudents,
+  nextDevelopmentMockResponseSequence,
+  readRawFormResponses,
+  readRegistrations,
+  readStudents,
+  readSubmissions,
+  removeFailedApprovalRow,
+  resetApprovalHistory,
+  replaceIssues,
+  replaceIssuesForSubmissions,
+  replaceItems,
+  replaceRegistrations,
+  replaceRawFormResponses,
+  replaceStudents,
+  replaceSubmissions,
+  requireSheet,
+  updateItemInput,
+  updateValidatedItems,
+  updateSubmission
+} from './repository';
+
+export type { SubmissionAction } from '../core/workflow';
+
+export interface DashboardData {
+  warning: number;
+  error: number;
+  clear: number;
+  hold: number;
+  pending: number;
+  rejected: number;
+  approved: number;
+  rosterRebuildRequired: boolean;
+  rosterRebuildMessage: string;
+  submissions: SubmissionSummary[];
+  globalWarnings: GlobalWarning[];
+}
+
+export interface ActionResult {
+  submissionId: string;
+  status: SubmissionStatus;
+  message: string;
+}
+
+export interface OpenIssueLocationResult {
+  sheetName: string;
+  rangeA1: string;
+}
+
+export interface EditItemResult {
+  submissionId: string;
+  submissionItemId: string;
+  message: string;
+}
+
+export interface DuplicateSelectionResult {
+  selectedSubmissionId: string;
+  rejectedCount: number;
+  message: string;
+}
+
+export interface BulkApprovalResult {
+  approvedCount: number;
+  skippedCount: number;
+  message: string;
+}
+
+export interface AdditionalMockCorrectionResult {
+  addedCount: number;
+  pendingCount: number;
+  message: string;
+}
+
+const REVIEWABLE: SubmissionStatus[] = ['PENDING_APPROVAL', 'NEEDS_CORRECTION', 'ON_HOLD'];
+const TERMINAL: SubmissionStatus[] = ['APPROVED', 'APPLIED', 'REJECTED', 'CORRECTION_REQUESTED'];
+const DASHBOARD_BUTTON_IMAGE_TITLE = '選手登録管理:件数ボタン';
+const DASHBOARD_COLORS = {
+  warning: '#9a5a00',
+  error: '#b4232c',
+  clear: '#2f6b56',
+  hold: '#52645b',
+  rejected: '#6b4f4f',
+  approved: '#315b7d',
+  buttonText: '#ffffff'
+} as const;
+const TRANSPARENT_PIXEL_PNG =
+  'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNgYAAAAAMAASsJTYQAAAAASUVORK5CYII=';
+
+export function initializeDevelopmentWorkbookData(): DashboardData {
+  assertAuthorized();
+  assertDevelopmentMode();
+  ensureApplicationSheets();
+  initializeSettings();
+  const mockStudents = generateMockStudents();
+  const mockConfig = readMockDataSettings(mockStudents);
+  const design = readFormDesign();
+  const generated = generateMockSubmissions({
+    year: design.year,
+    normalFormId: design.normalFormId,
+    correctionFormId: design.correctionFormId,
+    normalRegistry: readFormRegistry(design.normalFormId),
+    correctionRegistry: readFormRegistry(design.correctionFormId),
+    events: readEventSettings().filter((event) => event.enabled && event.year === design.year),
+    rules: readRuleSettings().filter((rule) => rule.enabled),
+    students: mockStudents,
+  }, mockConfig);
+  if (!Array.isArray(generated.submissions) || !Array.isArray(generated.items)
+    || !Array.isArray(generated.rawResponses)) {
+    throw new Error('疑似申請データを作成できませんでした。開発用データの設定を確認してください。');
+  }
+  replaceStudents(mockStudents);
+  replaceSubmissions(generated.submissions);
+  replaceItems(generated.items);
+  replaceRawFormResponses(generated.rawResponses);
+  replaceIssues([]);
+  resetApprovalHistory();
+  const result = revalidateAllSubmissions();
+  writeDashboard(result);
+  return result;
+}
+
+export function prepareMockDataSettings(): ReturnType<typeof readMockDataSettings> {
+  assertAuthorized();
+  assertDevelopmentMode();
+  ensureApplicationSheets();
+  const students = generateMockStudents();
+  ensureMockDataSettings(students);
+  return readMockDataSettings(students);
+}
+
+export function addDevelopmentMockCorrectionSubmissions(count: number): AdditionalMockCorrectionResult {
+  assertDevelopmentMode();
+  if (!Number.isInteger(count) || count < 1 || count > 100) {
+    throw new Error('追加する件数は1件から100件までの整数で入力してください。');
+  }
+  const lock = LockService.getDocumentLock();
+  if (!lock.tryLock(30_000)) throw new Error('ほかの担当者が処理中です。少し待ってから、もう一度実行してください。');
+  let beforeSubmissions: Submission[] = [];
+  let beforeItems: SubmissionItem[] = [];
+  let beforeRawResponses: ReturnType<typeof readRawFormResponses> = [];
+  let snapshotsReady = false;
+  try {
+    assertAuthorized();
+    ensureApplicationSheets();
+    beforeSubmissions = readSubmissions();
+    beforeItems = readItems();
+    beforeRawResponses = readRawFormResponses();
+    snapshotsReady = true;
+    if (!beforeSubmissions.some((submission) => isDevelopmentMockSubmissionId(submission.submissionId))) {
+      throw new Error('追加先となる疑似申請がありません。先に「開発用の疑似データを作る」を実行してください。');
+    }
+    if (isProductionStudentMasterActive()) {
+      throw new Error('本番用の「生徒マスター」が有効なため、疑似修正申請は追加できません。本番用シートのA列・B列を空にして疑似マスターへ切り替えてください。');
+    }
+    const students = readMockStudents();
+    if (students.length === 0) {
+      throw new Error('「疑似生徒マスター」が空です。先に開発用の疑似データを作ってください。');
+    }
+    const settings = readMockDataSettings(students);
+    const design = readFormDesign();
+    const generated = generateMockSubmissions({
+      year: design.year,
+      normalFormId: design.normalFormId,
+      correctionFormId: design.correctionFormId,
+      normalRegistry: readFormRegistry(design.normalFormId),
+      correctionRegistry: readFormRegistry(design.correctionFormId),
+      events: readEventSettings().filter((event) => event.enabled && event.year === design.year),
+      rules: readRuleSettings().filter((rule) => rule.enabled),
+      students,
+    }, {
+      submissionCount: count,
+      targetGrades: settings.targetGrades,
+      targetClasses: settings.targetClasses,
+      targetFormTypes: ['correction'],
+      errorSubmissionCount: 0,
+      warningSubmissionCount: 0,
+    }, nextDevelopmentMockResponseSequence());
+    replaceSubmissions([...beforeSubmissions, ...generated.submissions]);
+    replaceItems([...beforeItems, ...generated.items]);
+    replaceRawFormResponses([...beforeRawResponses, ...generated.rawResponses]);
+    const dashboard = revalidateAllSubmissions();
+    return {
+      addedCount: generated.submissions.length,
+      pendingCount: dashboard.pending,
+      message: `既存データを残したまま、疑似の修正申請を${generated.submissions.length}件追加しました。`,
+    };
+  } catch (error) {
+    if (snapshotsReady) {
+      replaceSubmissions(beforeSubmissions);
+      replaceItems(beforeItems);
+      replaceRawFormResponses(beforeRawResponses);
+    }
+    throw error;
+  } finally {
+    lock.releaseLock();
+  }
+}
+
+export function deleteDevelopmentWorkbookData(): DashboardData {
+  const lock = LockService.getDocumentLock();
+  if (!lock.tryLock(30_000)) throw new Error('ほかの担当者が処理中です。少し待ってから、もう一度実行してください。');
+  try {
+    assertAuthorized();
+    assertDevelopmentMode();
+    ensureApplicationSheets();
+    deleteDevelopmentMockRows();
+    const result = buildDashboardData(readSubmissions(), 'ALL');
+    writeDashboard(result);
+    return result;
+  } finally {
+    lock.releaseLock();
+  }
+}
+
+export function prepareRealFormTestData(): DashboardData {
+  const lock = LockService.getDocumentLock();
+  if (!lock.tryLock(30_000)) throw new Error('ほかの担当者が処理中です。少し待ってから、もう一度実行してください。');
+  try {
+    assertAuthorized();
+    assertDevelopmentMode();
+    ensureApplicationSheets();
+    deleteDevelopmentMockSubmissionRows();
+    const result = buildDashboardData(readSubmissions(), 'ALL');
+    writeDashboard(result);
+    return result;
+  } finally {
+    lock.releaseLock();
+  }
+}
+
+export function revalidateAllSubmissions(): DashboardData {
+  assertAuthorized();
+  const students = readStudents();
+  const submissions = readSubmissions();
+  const allItems = readItems();
+  const rules = readRuleSettings();
+  const normalizedItems: SubmissionItem[] = [];
+  const issues = [] as ReturnType<typeof readIssues>;
+  const checkedSubmissions = submissions.map((submission) => {
+    const items = allItems.filter((item) => item.submissionId === submission.submissionId);
+    const sameClassInitialSubmissionCount = duplicateCandidates(submissions, submission).length;
+    const validation = validateSubmission(submission, items, {
+      students,
+      sameClassInitialSubmissionCount,
+      rules,
+    });
+    normalizedItems.push(...validation.normalizedItems);
+    issues.push(...validation.issues);
+    return withValidation(submission, validation);
+  });
+  replaceItems(normalizedItems);
+  replaceIssues(issues);
+  replaceSubmissions(checkedSubmissions);
+  const data = buildDashboardData(checkedSubmissions, 'ALL');
+  writeDashboard(data);
+  return data;
+}
+
+/**
+ * Revalidates only the requested submissions and the initial submissions in the
+ * same classes whose duplicate-answer warning can change as a consequence.
+ */
+export function revalidateAffectedSubmissions(submissionIds: string[]): DashboardData {
+  assertAuthorized();
+  const submissions = readSubmissions();
+  const requested = new Set(affectedSubmissionIds(submissions, submissionIds));
+
+  if (requested.size === 0) {
+    const data = buildDashboardData(submissions, 'ALL');
+    writeDashboard(data);
+    return data;
+  }
+
+  const students = readStudents();
+  const allItems = readItems();
+  const rules = readRuleSettings();
+  const updatedById = new Map<string, Submission>();
+  const normalizedItems: SubmissionItem[] = [];
+  const issues: ReturnType<typeof readIssues> = [];
+  submissions.filter((submission) => requested.has(submission.submissionId))
+    .forEach((submission) => {
+      const validation = validateSubmission(
+        submission,
+        allItems.filter((item) => item.submissionId === submission.submissionId),
+        {
+          students,
+          sameClassInitialSubmissionCount: duplicateCandidates(submissions, submission).length,
+          rules,
+        },
+      );
+      normalizedItems.push(...validation.normalizedItems);
+      issues.push(...validation.issues);
+      updatedById.set(submission.submissionId, withValidation(submission, validation));
+    });
+
+  updateValidatedItems(normalizedItems);
+  replaceIssuesForSubmissions([...requested], issues);
+  updatedById.forEach((submission) => updateSubmission(submission));
+  const updatedSubmissions = submissions.map((submission) =>
+    updatedById.get(submission.submissionId) ?? submission);
+  const data = buildDashboardData(updatedSubmissions, 'ALL');
+  writeDashboard(data);
+  return data;
+}
+
+function withValidation(submission: Submission, result: ValidationResult): Submission {
+  if (TERMINAL.includes(submission.status) || submission.status === 'ON_HOLD') {
+    return { ...submission, warningCount: result.warningCount, errorCount: result.errorCount };
+  }
+  return {
+    ...submission,
+    warningCount: result.warningCount,
+    errorCount: result.errorCount,
+    status: result.nextStatus
+  };
+}
+
+export function getDashboardData(filter: DashboardFilter = 'ALL'): DashboardData {
+  assertAuthorized();
+  return buildDashboardData(readSubmissions(), filter);
+}
+
+export function listPendingSubmissions(filter: DashboardFilter = 'ALL'): SubmissionSummary[] {
+  return getDashboardData(filter).submissions;
+}
+
+function buildDashboardData(submissions: Submission[], filter: DashboardFilter): DashboardData {
+  const reviewable = submissions.filter((submission) => REVIEWABLE.includes(submission.status));
+  const counts = countReviewQueue(submissions);
+  const filterSource = filter === 'REJECTED'
+    ? submissions.filter((submission) => submission.status === 'REJECTED')
+    : filter === 'APPROVED'
+      ? submissions.filter((submission) =>
+        submission.status === 'APPROVED' || submission.status === 'APPLIED')
+      : reviewable;
+  const filtered = filterSource.filter((submission) => matchesFilter(submission, filter));
+  const globalWarnings = participationWarnings();
+  const rosterRebuildMessage = PropertiesService.getDocumentProperties()
+    .getProperty(SCRIPT_PROPERTIES.rosterRebuildRequired) ?? '';
+  return {
+    ...counts,
+    warning: counts.warning + globalWarnings.length,
+    submissions: filtered.map(toSummary).sort((a, b) => b.submittedAt.localeCompare(a.submittedAt)),
+    globalWarnings: filter === 'ALL' || filter === 'WARNING' ? globalWarnings : [],
+    rosterRebuildRequired: rosterRebuildMessage !== '',
+    rosterRebuildMessage,
+  };
+}
+
+function participationWarnings(): GlobalWarning[] {
+  const students = readStudents();
+  if (students.length === 0) return [];
+  const registrations = readRegistrations();
+  const submissions = readSubmissions();
+  const developmentMode = submissions.some((submission) =>
+    isDevelopmentMockSubmissionId(submission.submissionId));
+  const eligibleSubmissionIds = new Set(submissions
+    .filter((submission) => submission.status !== 'REJECTED' && submission.status !== 'CORRECTION_REQUESTED')
+    .map((submission) => submission.submissionId));
+  const registeredStudentIds = registrations.length > 0 && !developmentMode
+    ? registrations.map((registration) => registration.studentId)
+    : readItems()
+      .filter((item) => eligibleSubmissionIds.has(item.submissionId) && item.registrationState === 'REGISTER')
+      .map((item) => item.normalizedStudentId || item.studentIdInput);
+  return buildParticipationWarnings(students, registeredStudentIds);
+}
+
+function matchesFilter(submission: Submission, filter: DashboardFilter): boolean {
+  if (filter === 'WARNING') return submission.status !== 'ON_HOLD' && submission.warningCount > 0;
+  if (filter === 'ERROR') return submission.status !== 'ON_HOLD' && submission.errorCount > 0;
+  if (filter === 'CLEAR') return submission.warningCount === 0 && submission.errorCount === 0 && submission.status !== 'ON_HOLD';
+  if (filter === 'HOLD') return submission.status === 'ON_HOLD';
+  if (filter === 'REJECTED') return submission.status === 'REJECTED';
+  if (filter === 'APPROVED') return submission.status === 'APPROVED' || submission.status === 'APPLIED';
+  return true;
+}
+
+const toSummary = (submission: Submission): SubmissionSummary => ({
+  submissionId: submission.submissionId,
+  submissionType: submission.submissionType,
+  submittedAt: submission.submittedAt,
+  targetGrade: submission.targetGrade,
+  targetClass: submission.targetClass,
+  status: submission.status,
+  warningCount: submission.warningCount,
+  errorCount: submission.errorCount
+});
+
+export function getSubmissionDetail(submissionId: string): SubmissionDetail {
+  assertAuthorized();
+  const submission = findSubmission(submissionId);
+  if (!submission) throw new Error('指定された申請が見つかりません。一覧を開き直してください。');
+  const rawResponse = findRawFormResponseBySubmissionId(submissionId);
+  let responseNote = '';
+  if (rawResponse?.answerJson) {
+    try {
+      const answers = JSON.parse(rawResponse.answerJson) as Record<string, unknown>;
+      responseNote = String(answers.correction_reason ?? '');
+    } catch {
+      responseNote = '';
+    }
+  }
+  const allItems = readItems();
+  return toClientSafe({
+    submission,
+    items: allItems.filter((item) => item.submissionId === submissionId),
+    issues: readIssues().filter((issue) => issue.submissionId === submissionId),
+    approvalHistory: readApprovalHistory(submissionId).map((record) => ({
+      action: record.action, actorEmail: record.actorEmail, reason: record.reason, actedAt: record.actedAt,
+    })),
+    responseNote,
+    duplicateCandidates: duplicateCandidates(readSubmissions(), submission).map((candidate) => ({
+      submission: candidate,
+      items: allItems.filter((item) => item.submissionId === candidate.submissionId),
+    })),
+  });
+}
+
+export function selectDuplicateSubmission(selectedSubmissionId: string): DuplicateSelectionResult {
+  const lock = LockService.getDocumentLock();
+  if (!lock.tryLock(15_000)) throw new Error('ほかの担当者が処理中です。少し待ってから、もう一度実行してください。');
+  const historyRows: number[] = [];
+  const originals: Submission[] = [];
+  let rejectedCount = 0;
+  try {
+    const actorEmail = assertAuthorized();
+    const submissions = readSubmissions();
+    const selected = submissions.find((submission) => submission.submissionId === selectedSubmissionId);
+    if (!selected) throw new Error('採用する回答が見つかりません。申請一覧を開き直してください。');
+    const candidates = duplicateCandidates(submissions, selected);
+    if (candidates.length < 2) throw new Error('比較できる回答が2件以上ありません。申請を再検査してください。');
+    originals.push(...candidates);
+    candidates.forEach((candidate) => {
+      const selectedCandidate = candidate.submissionId === selectedSubmissionId;
+      if (!selectedCandidate) {
+        updateSubmission({ ...candidate, status: 'REJECTED' });
+        rejectedCount += 1;
+      }
+      historyRows.push(appendApproval({
+        approvalId: Utilities.getUuid(), submissionId: candidate.submissionId,
+        action: selectedCandidate ? '重複回答から採用' : '重複回答のため不採用', actorEmail,
+        reason: selectedCandidate
+          ? '同じクラスの複数回答を比較し、この回答を採用しました。'
+          : `同じクラスの複数回答を比較し、${selectedSubmissionId}を採用しました。`,
+        actedAt: new Date().toISOString(),
+      }));
+    });
+  } catch (error) {
+    originals.forEach((submission) => {
+      try { updateSubmission(submission); } catch { /* 元のエラーを優先する。 */ }
+    });
+    historyRows.reverse().forEach((row) => {
+      try { removeFailedApprovalRow(row); } catch { /* 元のエラーを優先する。 */ }
+    });
+    throw error;
+  } finally {
+    lock.releaseLock();
+  }
+  revalidateAffectedSubmissions(originals.map((submission) => submission.submissionId));
+  return {
+    selectedSubmissionId, rejectedCount,
+    message: `この回答を採用し、ほかの${rejectedCount}件を不採用にしました。`,
+  };
+}
+
+export function approveAllClearSubmissions(): BulkApprovalResult {
+  const lock = LockService.getDocumentLock();
+  if (!lock.tryLock(30_000)) throw new Error('ほかの担当者が処理中です。少し待ってから、もう一度実行してください。');
+  const historyRows: number[] = [];
+  const originals: Submission[] = [];
+  let approvedCount = 0;
+  let skippedCount = 0;
+  try {
+    const actorEmail = assertAuthorized();
+    const submissions = readSubmissions();
+    const allItems = readItems();
+    const students = readStudents();
+    const rules = readRuleSettings();
+    const candidates = clearApprovalCandidates(submissions);
+    candidates.forEach((candidate) => {
+      const validation = validateSubmission(
+        candidate,
+        allItems.filter((item) => item.submissionId === candidate.submissionId),
+        {
+          students,
+          sameClassInitialSubmissionCount: duplicateCandidates(submissions, candidate).length,
+          rules,
+        },
+      );
+      if (validation.warningCount > 0 || validation.errorCount > 0 || validation.nextStatus !== 'PENDING_APPROVAL') {
+        skippedCount += 1;
+        return;
+      }
+      originals.push(candidate);
+      updateSubmission({ ...candidate, status: 'APPROVED', warningCount: 0, errorCount: 0 });
+      historyRows.push(appendApproval({
+        approvalId: Utilities.getUuid(), submissionId: candidate.submissionId,
+        action: '問題なしを一括承認', actorEmail,
+        reason: '警告0件・エラー0件であることを再検査し、一括承認しました。',
+        actedAt: new Date().toISOString(),
+      }));
+      approvedCount += 1;
+    });
+  } catch (error) {
+    originals.forEach((submission) => {
+      try { updateSubmission(submission); } catch { /* 元のエラーを優先する。 */ }
+    });
+    historyRows.reverse().forEach((row) => {
+      try { removeFailedApprovalRow(row); } catch { /* 元のエラーを優先する。 */ }
+    });
+    throw error;
+  } finally {
+    lock.releaseLock();
+  }
+  revalidateAffectedSubmissions(originals.map((submission) => submission.submissionId));
+  return {
+    approvedCount, skippedCount,
+    message: skippedCount > 0
+      ? `${approvedCount}件を承認しました。再検査で問題が見つかった${skippedCount}件は承認していません。`
+      : `${approvedCount}件をまとめて承認しました。`,
+  };
+}
+
+export function openIssueLocation(
+  submissionId: string,
+  submissionItemId = ''
+): OpenIssueLocationResult {
+  assertAuthorized();
+  const itemTarget = submissionItemId.trim() !== '';
+  const sheetName = itemTarget ? SHEETS.items : SHEETS.submissions;
+  const targetId = itemTarget ? submissionItemId : submissionId;
+  const sheet = requireSheet(sheetName);
+  const row = findRowById(sheet, targetId);
+  if (row < 2) {
+    throw new Error(itemTarget
+      ? '修正する入力欄が見つかりません。申請を再検査してから、もう一度開いてください。'
+      : '対象の申請行が見つかりません。一覧を開き直してください。');
+  }
+  const range = itemTarget
+    ? sheet.getRange(row, ITEM_HEADERS.indexOf('student_id_input') + 1, 1, 2)
+    : sheet.getRange(row, 1, 1, SUBMISSION_HEADERS.length);
+  const book = SpreadsheetApp.getActiveSpreadsheet();
+  book.setActiveSheet(sheet);
+  book.setActiveRange(range);
+  book.toast(
+    itemTarget
+      ? '青く選択された学籍番号・氏名を確認してください。直した後は「すべて再検査する」を実行します。'
+      : '青く選択された申請全体の情報を確認してください。',
+    '修正箇所を開きました',
+    8
+  );
+  return { sheetName, rangeA1: range.getA1Notation() };
+}
+
+export function editSubmissionItem(
+  submissionId: string,
+  submissionItemId: string,
+  studentIdInput: string,
+  registrationState: SubmissionItem['registrationState'],
+  reason: string
+): EditItemResult {
+  const lock = LockService.getDocumentLock();
+  if (!lock.tryLock(15_000)) {
+    throw new Error('ほかの担当者が処理中です。少し待ってから、もう一度操作してください。');
+  }
+  let result: EditItemResult;
+  try {
+    const actorEmail = assertAuthorized();
+    const submission = findSubmission(submissionId);
+    if (!submission) throw new Error('指定された申請が見つかりません。一覧を開き直してください。');
+    if (!REVIEWABLE.includes(submission.status)) {
+      throw new Error('この申請は現在修正できる状態ではありません。申請一覧を開き直してください。');
+    }
+    if (reason.trim() === '') {
+      throw new Error('修正理由を入力してください。何をどう直したか後から確認できるようにします。');
+    }
+    const before = findItem(submissionItemId);
+    if (!before || before.submissionId !== submissionId) {
+      throw new Error('修正する申請項目が見つかりません。詳細を開き直してください。');
+    }
+    const normalizedStudentIdInput = studentIdInput.trim();
+    const after = updateItemInput(submissionItemId, normalizedStudentIdInput, registrationState);
+    try {
+      appendChangeHistory({
+        changeId: Utilities.getUuid(),
+        submissionId,
+        submissionItemId,
+        beforeStudentId: before.studentIdInput,
+        afterStudentId: after.studentIdInput,
+        beforeStudentName: before.studentNameInput,
+        afterStudentName: after.studentNameInput,
+        beforeRegistrationState: before.registrationState,
+        afterRegistrationState: after.registrationState,
+        reason: reason.trim(),
+        actorEmail,
+        changedAt: new Date().toISOString()
+      });
+    } catch (error) {
+      updateItemInput(submissionItemId, before.studentIdInput, before.registrationState);
+      throw error;
+    }
+    result = {
+      submissionId,
+      submissionItemId,
+      message: '修正を保存しました。自動再検査後に結果を更新します。'
+    };
+  } finally {
+    lock.releaseLock();
+  }
+  revalidateAffectedSubmissions([submissionId]);
+  return result;
+}
+
+function findRowById(sheet: ReturnType<typeof requireSheet>, targetId: string): number {
+  if (sheet.getLastRow() < 2) return 0;
+  const found = sheet.getRange(2, 1, sheet.getLastRow() - 1, 1)
+    .createTextFinder(targetId)
+    .matchEntireCell(true)
+    .findNext();
+  return found?.getRow() ?? 0;
+}
+
+export function performSubmissionAction(
+  submissionId: string,
+  action: SubmissionAction,
+  reason = ''
+): ActionResult {
+  const lock = LockService.getDocumentLock();
+  if (!lock.tryLock(15_000)) {
+    throw new Error('ほかの担当者が処理中です。少し待ってから、もう一度操作してください。');
+  }
+  let historyRow = 0;
+  let previous: Submission | undefined;
+  let previousItems: SubmissionItem[] | undefined;
+  let previousIssues: ReturnType<typeof readIssues> | undefined;
+  let previousRegistrations: ReturnType<typeof readRegistrations> | undefined;
+  let previousRosterRebuildMessage: string | null = null;
+  try {
+    const actorEmail = assertAuthorized();
+    const submission = findSubmission(submissionId);
+    if (!submission) throw new Error('指定された申請が見つかりません。一覧を開き直してください。');
+    previous = submission;
+    previousItems = readItems().filter((item) => item.submissionId === submissionId);
+    previousIssues = readIssues().filter((issue) => issue.submissionId === submissionId);
+    if (action === 'REOPEN_APPROVED' && submission.status === 'APPLIED') {
+      if (PropertiesService.getDocumentProperties().getProperty(SCRIPT_PROPERTIES.playerRosterJob)) {
+        throw new Error('選手名簿を作成中のため、名簿反映済み申請は戻せません。名簿作成が完了するか、途中の作成を取り消してから実行してください。');
+      }
+      previousRegistrations = readRegistrations();
+      previousRosterRebuildMessage = PropertiesService.getDocumentProperties()
+        .getProperty(SCRIPT_PROPERTIES.rosterRebuildRequired);
+    }
+    if (action === 'APPROVE' && previousIssues.some((issue) =>
+      issue.submissionId === submissionId && issue.issueCode === ISSUE_CODES.MULTIPLE_INITIAL_SUBMISSIONS)) {
+      throw new Error('同じクラスの回答が複数あります。先に回答を比較し、採用する1件を選んでください。');
+    }
+    const validationTarget = action === 'RESUME'
+      ? { ...submission, receptionOpen: true }
+      : action === 'RESTORE' || action === 'REOPEN_APPROVED'
+        ? { ...submission, status: 'PENDING_APPROVAL' as const }
+        : submission;
+    const validation = action === 'APPROVE' || action === 'RESUME'
+      || action === 'RESTORE' || action === 'REOPEN_APPROVED'
+      ? revalidateOne(validationTarget)
+      : undefined;
+    assertActionAllowed(submission, action, reason, validation);
+    const candidate = validation ? {
+      ...validationTarget,
+      warningCount: validation.warningCount,
+      errorCount: validation.errorCount
+    } : submission;
+    const status = nextStatusForAction(action, validation);
+    const updated = { ...candidate, status };
+    updateSubmission(updated);
+    try {
+      historyRow = appendApproval({
+        approvalId: Utilities.getUuid(), submissionId, action, actorEmail,
+        reason: reason.trim(), actedAt: new Date().toISOString()
+      });
+    } catch (error) {
+      updateSubmission(submission);
+      throw error;
+    }
+    if (validation) {
+      updateValidatedItems(validation.normalizedItems);
+      replaceIssuesForSubmissions([submissionId], validation.issues);
+    }
+    if (action === 'REOPEN_APPROVED' && submission.status === 'APPLIED') {
+      const appliedOnly = readSubmissions().map((current) => current.status === 'APPROVED'
+        ? { ...current, status: 'PENDING_APPROVAL' as const }
+        : current);
+      const timestamp = new Date();
+      replaceRegistrations(buildRegistrationSnapshot({
+        submissions: appliedOnly,
+        items: readItems(),
+        students: readStudents(),
+        versionName: `承認取消_${Utilities.formatDate(timestamp, 'Asia/Tokyo', 'yyyyMMdd_HHmmss')}`,
+        updatedAt: timestamp.toISOString(),
+        updatedBy: actorEmail,
+      }));
+      PropertiesService.getDocumentProperties().setProperty(
+        SCRIPT_PROPERTIES.rosterRebuildRequired,
+        '名簿反映済み申請の承認を取り消したため、配布用名簿は旧版です。申請を修正・再承認して、新しい名簿版を作成してください。',
+      );
+    }
+    writeDashboard(buildDashboardData(readSubmissions(), 'ALL'));
+    return { submissionId, status, message: actionMessage(action) };
+  } catch (error) {
+    if (historyRow > 0 && previous) {
+      try {
+        removeFailedApprovalRow(historyRow);
+        updateSubmission(previous);
+        if (previousItems) updateValidatedItems(previousItems);
+        if (previousIssues) replaceIssuesForSubmissions([submissionId], previousIssues);
+        if (previousRegistrations) replaceRegistrations(previousRegistrations);
+        if (previousRegistrations) {
+          const properties = PropertiesService.getDocumentProperties();
+          if (previousRosterRebuildMessage == null) {
+            properties.deleteProperty(SCRIPT_PROPERTIES.rosterRebuildRequired);
+          } else {
+            properties.setProperty(SCRIPT_PROPERTIES.rosterRebuildRequired, previousRosterRebuildMessage);
+          }
+        }
+      } catch {
+        // 元のエラーを優先する。個人情報はログへ出力しない。
+      }
+    }
+    throw error;
+  } finally {
+    lock.releaseLock();
+  }
+}
+
+function revalidateOne(submission: Submission): ValidationResult {
+  const allSubmissions = readSubmissions().map((candidate) =>
+    candidate.submissionId === submission.submissionId ? submission : candidate);
+  return validateSubmission(
+    submission,
+    readItems().filter((item) => item.submissionId === submission.submissionId),
+    {
+      students: readStudents(),
+      sameClassInitialSubmissionCount: duplicateCandidates(allSubmissions, submission).length,
+      rules: readRuleSettings(),
+    }
+  );
+}
+
+function actionMessage(action: SubmissionAction): string {
+  if (action === 'APPROVE') return '申請を承認しました。正式データと帳票はまだ変更していません。';
+  if (action === 'HOLD') return '申請を保留にしました。';
+  if (action === 'REJECT') return '申請を却下しました。';
+  if (action === 'RESTORE') return '却下済み申請を再検査し、確認できる状態へ戻しました。';
+  if (action === 'REOPEN_APPROVED') return '承認を取り消し、申請を再検査して確認待ちへ戻しました。名簿反映済みだった場合は登録データも再構築しました。修正・再承認後に新しい名簿版を作成してください。';
+  return '申請の確認を再開しました。';
+}
+
+function writeDashboard(data: DashboardData): void {
+  const sheet = requireSheet(SHEETS.dashboard);
+  // 既存の結合範囲が現在のデータ範囲より広い場合も安全に解除する。
+  sheet.getRange(1, 1, sheet.getMaxRows(), sheet.getMaxColumns()).breakApart();
+  sheet.clear();
+  const rows: SheetValueForDashboard[][] = [
+    ['体育祭 選手登録管理', ''],
+    ['現在の確認状況', '件数'],
+    ['未処理の申請', data.pending],
+    ['警告', `${data.warning}件  開く`],
+    ['エラー', `${data.error}件  開く`],
+    ['問題なし', `${data.clear}件  開く`],
+    ['保留', `${data.hold}件  開く`],
+    ['却下済み', `${data.rejected}件  開く`],
+    ['承認済み', `${data.approved}件  開く`],
+    ['配布用名簿', data.rosterRebuildRequired ? '要再作成' : '最新'],
+    ['', ''],
+    ['操作方法', '色付きの「開く」を押してください。反応しない場合は、上の「選手登録管理」メニューから開けます。']
+  ];
+  sheet.getRange(1, 1, rows.length, 2).setValues(rows);
+  sheet.getRange('A1:B1').merge().setFontWeight('bold').setFontSize(16);
+  sheet.getRange('A2:B2').setFontWeight('bold').setBackground('#d9ead3');
+  sheet.getRange('A4:A9').setFontWeight('bold').setVerticalAlignment('middle');
+  sheet.getRange('B4:B9')
+    .setFontWeight('bold')
+    .setFontColor(DASHBOARD_COLORS.buttonText)
+    .setHorizontalAlignment('center')
+    .setVerticalAlignment('middle');
+  sheet.getRange('B4').setBackground(DASHBOARD_COLORS.warning);
+  sheet.getRange('B5').setBackground(DASHBOARD_COLORS.error);
+  sheet.getRange('B6').setBackground(DASHBOARD_COLORS.clear);
+  sheet.getRange('B7').setBackground(DASHBOARD_COLORS.hold);
+  sheet.getRange('B8').setBackground(DASHBOARD_COLORS.rejected);
+  sheet.getRange('B9').setBackground(DASHBOARD_COLORS.approved);
+  sheet.getRange('A10:B10').setFontWeight('bold')
+    .setBackground(data.rosterRebuildRequired ? '#fce8e6' : '#e6f4ea')
+    .setFontColor(data.rosterRebuildRequired ? DASHBOARD_COLORS.error : DASHBOARD_COLORS.clear);
+  sheet.setRowHeights(4, 6, 44);
+  sheet.setColumnWidth(1, 180);
+  sheet.setColumnWidth(2, 420);
+  sheet.setFrozenRows(2);
+  installDashboardButtons(sheet);
+}
+
+type SheetValueForDashboard = string | number;
+
+function installDashboardButtons(sheet: ReturnType<typeof requireSheet>): void {
+  sheet.getImages()
+    .filter((image) => image.getAltTextTitle() === DASHBOARD_BUTTON_IMAGE_TITLE)
+    .forEach((image) => image.remove());
+
+  const buttonSpecs = [
+    { row: 4, script: 'showWarningDashboard', label: '警告がある申請を開く' },
+    { row: 5, script: 'showErrorDashboard', label: 'エラーがある申請を開く' },
+    { row: 6, script: 'showClearDashboard', label: '問題がない申請を開く' },
+    { row: 7, script: 'showHoldDashboard', label: '保留中の申請を開く' },
+    { row: 8, script: 'showRejectedDashboard', label: '却下済みの申請を開く' },
+    { row: 9, script: 'showApprovedDashboard', label: '承認済みの申請を開く' }
+  ];
+  const imageBlob = Utilities.newBlob(
+    Utilities.base64Decode(TRANSPARENT_PIXEL_PNG),
+    'image/png',
+    'dashboard-button.png'
+  );
+  buttonSpecs.forEach(({ row, script, label }) => {
+    sheet.insertImage(imageBlob, 2, row, 2, 2)
+      .setWidth(416)
+      .setHeight(40)
+      .setAltTextTitle(DASHBOARD_BUTTON_IMAGE_TITLE)
+      .setAltTextDescription(label)
+      .assignScript(script);
+  });
+}
+
+export function dashboardFilterFromSelection(): DashboardFilter {
+  const range = SpreadsheetApp.getActiveRange();
+  if (!range || range.getSheet().getName() !== SHEETS.dashboard) return 'ALL';
+  const label = String(range.getSheet().getRange(range.getRow(), 1).getDisplayValue());
+  if (label.includes('警告')) return 'WARNING';
+  if (label.includes('エラー')) return 'ERROR';
+  if (label.includes('問題なし')) return 'CLEAR';
+  if (label.includes('保留')) return 'HOLD';
+  if (label.includes('却下')) return 'REJECTED';
+  if (label.includes('承認済み')) return 'APPROVED';
+  return 'ALL';
+}
+
+export function showFilteredSidebarFromSelection(): void {
+  const template = HtmlService.createTemplateFromFile('Sidebar');
+  template.initialFilter = dashboardFilterFromSelection();
+  template.uiTokens = HtmlService.createHtmlOutputFromFile('UiTokens').getContent();
+  SpreadsheetApp.getUi().showSidebar(template.evaluate().setTitle('申請を確認する'));
+}

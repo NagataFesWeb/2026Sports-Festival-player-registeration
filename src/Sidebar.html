@@ -1,0 +1,504 @@
+<!doctype html>
+<html lang="ja">
+<head>
+  <base target="_top">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <?!= uiTokens ?>
+  <style>
+    * { box-sizing: border-box; }
+    body { margin: 0; background: var(--color-paper); color: var(--color-ink); font: 16px/1.65 var(--font-ui); }
+    button, textarea { font: inherit; }
+    button { min-height: 44px; border: 1px solid var(--color-track); border-radius: var(--radius-control); background: var(--color-field); color: var(--color-ink); cursor: pointer; padding: var(--space-2) var(--space-3); transition: transform var(--motion-fast), border-color var(--motion-fast); }
+    button:hover { border-color: var(--color-primary); }
+    button:active { transform: translateY(1px); }
+    button:focus-visible, textarea:focus-visible { outline: 3px solid var(--color-focus); outline-offset: 2px; }
+    button:disabled { cursor: not-allowed; opacity: .48; transform: none; }
+    .primary { background: var(--color-primary); border-color: var(--color-primary); color: white; font-weight: 700; }
+    .primary:hover { background: var(--color-primary-dark); }
+    .danger { color: var(--color-danger); border-color: var(--color-danger); }
+    .shell { max-width: 680px; margin: auto; padding: var(--space-4); }
+    header { border-bottom: 4px solid var(--color-primary); padding-bottom: var(--space-3); margin-bottom: var(--space-4); }
+    h1 { margin: 0; font-size: 1.35rem; line-height: 1.35; }
+    h2 { font-size: 1.05rem; margin: var(--space-6) 0 var(--space-2); }
+    p { margin: var(--space-2) 0; }
+    .muted { color: var(--color-muted); font-size: .9rem; }
+    .counts { display: grid; grid-template-columns: 1fr 1fr; gap: var(--space-2); margin-bottom: var(--space-4); }
+    .bulk { margin-bottom: var(--space-4); padding: var(--space-4); background: var(--color-primary-soft); border-left: 8px solid var(--color-primary); border-radius: var(--radius-card); }
+    .bulk strong { display: block; }
+    .bulk button { width: 100%; margin-top: var(--space-3); }
+    .cleanup { margin-top: var(--space-6); padding: var(--space-4); background: var(--color-field); border: 1px solid var(--color-track); border-radius: var(--radius-card); }
+    .cleanup button { width: 100%; margin-top: var(--space-3); }
+    .count { text-align: left; font-weight: 700; }
+    .count[data-filter="ERROR"] { border-left: 6px solid var(--color-danger); }
+    .count[data-filter="WARNING"] { border-left: 6px solid var(--color-warning); }
+    .count[data-filter="REJECTED"] { border-left: 6px solid #6b4f4f; }
+    .count[data-filter="APPROVED"] { border-left: 6px solid #315b7d; }
+    .count[aria-pressed="true"] { background: var(--color-primary-soft); border-color: var(--color-primary); }
+    .list { display: grid; gap: var(--space-3); }
+    .submission, .issue { background: var(--color-field); border: 1px solid var(--color-track); border-radius: var(--radius-card); padding: var(--space-4); }
+    .submission { width: 100%; text-align: left; }
+    .submission strong { display: block; font-size: 1.05rem; }
+    .badges { display: flex; flex-wrap: wrap; gap: var(--space-2); margin-top: var(--space-2); }
+    .badge { border-radius: 999px; padding: 2px 9px; font-size: .82rem; font-weight: 700; }
+    .badge.error { color: var(--color-danger); background: var(--color-danger-bg); }
+    .badge.warning { color: var(--color-warning); background: var(--color-warning-bg); }
+    .issue { border-left-width: 8px; }
+    .issue.error { border-left-color: var(--color-danger); }
+    .issue.warning { border-left-color: var(--color-warning); }
+    .issue h3 { margin: 0 0 var(--space-2); font-size: 1rem; }
+    .submitter { background: var(--color-field); border: 1px solid var(--color-track); border-radius: var(--radius-control); padding: var(--space-3); margin-top: var(--space-3); }
+    .submitter p, .issue p { margin: var(--space-1) 0; }
+    .issue .location { font-weight: 700; color: var(--color-primary-dark); }
+    .issue .message { font-weight: 700; }
+    .instruction { white-space: pre-wrap; background: var(--color-paper); padding: var(--space-3); border-radius: var(--radius-control); }
+    .comparison { display: grid; gap: var(--space-3); margin-top: var(--space-3); }
+    .candidate { background: var(--color-field); border: 2px solid var(--color-track); border-radius: var(--radius-card); padding: var(--space-3); }
+    .candidate.current { border-color: var(--color-primary); }
+    .candidate h4 { margin: 0; font-size: 1rem; }
+    .candidate-list { display: grid; gap: var(--space-2); margin: var(--space-3) 0; }
+    .candidate-item { padding-top: var(--space-2); border-top: 1px solid var(--color-track); }
+    .candidate-item strong, .candidate-item span { display: block; }
+    .candidate button { width: 100%; }
+    .actions { display: grid; gap: var(--space-2); margin-top: var(--space-4); }
+    .actions.secondary { grid-template-columns: 1fr 1fr; }
+    input, select, textarea { width: 100%; min-height: 44px; border: 1px solid var(--color-track); border-radius: var(--radius-control); padding: var(--space-3); background: var(--color-field); color: var(--color-ink); font-size: 16px; }
+    textarea { min-height: 96px; resize: vertical; }
+    .editor { background: var(--color-primary-soft); border: 2px solid var(--color-primary); border-radius: var(--radius-card); padding: var(--space-4); }
+    .editor label { display: block; margin-top: var(--space-3); font-weight: 700; }
+    .editor .form-actions { display: grid; grid-template-columns: 1fr 1fr; gap: var(--space-2); margin-top: var(--space-4); }
+    .notice { padding: var(--space-3); border-left: 6px solid var(--color-primary); background: var(--color-primary-soft); }
+    .notice.error { border-color: var(--color-danger); background: var(--color-danger-bg); }
+    .global-warning { border-left: 8px solid var(--color-warning); background: var(--color-warning-bg); }
+    .student-details { margin-top: var(--space-3); }
+    .student-details summary { cursor: pointer; font-weight: 700; color: var(--color-primary-dark); }
+    .student-table-wrap { max-height: 380px; overflow: auto; margin-top: var(--space-2); border: 1px solid var(--color-track); border-radius: var(--radius-control); background: var(--color-field); }
+    .student-table { width: 100%; border-collapse: collapse; font-size: .9rem; }
+    .student-table th, .student-table td { padding: 7px 8px; border-bottom: 1px solid var(--color-track); text-align: left; vertical-align: top; }
+    .student-table th { position: sticky; top: 0; background: var(--color-primary-soft); font-weight: 700; }
+    .student-table td:nth-child(1), .student-table td:nth-child(2) { white-space: nowrap; }
+    .empty { border: 1px dashed var(--color-track); padding: var(--space-6); text-align: center; }
+    .spinner { width: 28px; height: 28px; margin: var(--space-8) auto; border: 4px solid var(--color-track); border-top-color: var(--color-primary); border-radius: 50%; animation: spin .8s linear infinite; }
+    @keyframes spin { to { transform: rotate(360deg); } }
+    @media (prefers-reduced-motion: reduce) { *, *::before, *::after { animation-duration: .01ms !important; transition-duration: .01ms !important; } }
+    @media (min-width: 560px) { .counts { grid-template-columns: repeat(4, 1fr); } .actions { grid-template-columns: 2fr 1fr; } }
+  </style>
+</head>
+<body><main id="app" class="shell" aria-live="polite"></main>
+<script>
+  const state = { filter: <?!= JSON.stringify(initialFilter || 'ALL') ?>, detail: null };
+  const app = document.getElementById('app');
+  const labels = {
+    INITIAL: '通常登録', CORRECTION: '修正申請', MANUAL_CHANGE: '手動変更',
+    PENDING_APPROVAL: '確認待ち', NEEDS_CORRECTION: '修正必要', ON_HOLD: '保留',
+    CORRECTION_REQUESTED: '修正依頼済み', REJECTED: '却下', APPROVED: '承認済み', APPLIED: '名簿反映済み'
+  };
+  const registrationStateLabels = { REGISTER: '選手を登録する', PENDING: '調整中', NOT_PARTICIPATING: '出場しない' };
+
+  function el(tag, className, text) {
+    const node = document.createElement(tag);
+    if (className) node.className = className;
+    if (text !== undefined) node.textContent = String(text);
+    return node;
+  }
+  function loading() { app.replaceChildren(el('div', 'spinner')); }
+  function showFailure(error) {
+    const box = el('div', 'notice error');
+    box.append(el('strong', '', '画面を読み込めませんでした。'), el('p', '', error && error.message ? error.message : 'スプレッドシートを開き直して、もう一度お試しください。'));
+    const retry = el('button', '', 'もう一度読み込む'); retry.onclick = loadDashboard; box.append(retry);
+    app.replaceChildren(box);
+  }
+  function run(name, ...args) {
+    return new Promise((resolve, reject) => google.script.run.withSuccessHandler(resolve).withFailureHandler(reject)[name](...args));
+  }
+  function badge(kind, count) { return el('span', `badge ${kind}`, `${kind === 'error' ? 'エラー' : '警告'} ${count}件`); }
+  function classFromStudentId(studentId) { const match = String(studentId || '').trim().match(/^([1-3])([1-8])[0-9]{2}$/); return match ? `${match[1]}年${match[2]}組` : '学籍番号から確認できません'; }
+
+  async function loadDashboard(filter = state.filter) {
+    state.filter = filter; state.detail = null; loading();
+    try { renderDashboard(await run('getDashboardData', filter)); } catch (error) { showFailure(error); }
+  }
+  function renderDashboard(data) {
+    const header = el('header'); header.append(el('h1', '', '体育祭 選手登録管理'), el('p', 'muted', '件数を押すと、該当する申請だけを表示します。'));
+    if (data.rosterRebuildRequired) {
+      header.append(el('div', 'notice error', data.rosterRebuildMessage || '配布用名簿を新しい版で作り直してください。'));
+    }
+    const counts = el('section', 'counts');
+    [['WARNING','警告',data.warning],['ERROR','エラー',data.error],['CLEAR','問題なし',data.clear],['HOLD','保留',data.hold],['REJECTED','却下済み',data.rejected],['APPROVED','承認済み',data.approved]].forEach(([filter,label,count]) => {
+      const button = el('button', 'count', `${label} ${count}件`); button.dataset.filter = filter; button.setAttribute('aria-pressed', String(state.filter === filter)); button.onclick = () => loadDashboard(filter); counts.append(button);
+    });
+    const list = el('section', 'list');
+    (data.globalWarnings || []).forEach((warning) => {
+      const card = el('article', 'issue warning global-warning');
+      card.append(
+        el('h3', '', '全体の警告 1件'),
+        el('p', 'message', warning.title),
+        el('p', '', warning.message),
+        el('strong', '', '確認方法'),
+        el('p', '', warning.fixInstruction)
+      );
+      const students = warning.affectedStudents || [];
+      if (students.length) {
+        const details = el('details', 'student-details');
+        details.open = students.length <= 10;
+        details.append(el('summary', '', `出場していない生徒を確認する（${students.length}人）`));
+        const wrap = el('div', 'student-table-wrap');
+        const table = el('table', 'student-table');
+        const head = el('thead');
+        const headRow = el('tr');
+        ['クラス', '学籍番号', '氏名'].forEach((label) => headRow.append(el('th', '', label)));
+        head.append(headRow);
+        const body = el('tbody');
+        students.forEach((student) => {
+          const row = el('tr');
+          row.append(
+            el('td', '', `${student.grade}年${student.classNumber}組`),
+            el('td', '', student.studentId),
+            el('td', '', student.name)
+          );
+          body.append(row);
+        });
+        table.append(head, body); wrap.append(table); details.append(wrap); card.append(details);
+      }
+      list.append(card);
+    });
+    if (!data.submissions.length && !(data.globalWarnings || []).length) list.append(el('div', 'empty', 'この条件に当てはまる未処理申請はありません。'));
+    data.submissions.forEach((submission) => {
+      const button = el('button', 'submission');
+      button.append(el('strong', '', `${submission.targetGrade}年${submission.targetClass}組 ${labels[submission.submissionType] || submission.submissionType}`), el('span', 'muted', `${labels[submission.status] || submission.status} ・ ${formatDate(submission.submittedAt)}`));
+      const badges = el('span', 'badges'); badges.append(badge('warning', submission.warningCount), badge('error', submission.errorCount)); button.append(badges);
+      button.onclick = () => loadDetail(submission.submissionId); list.append(button);
+    });
+    const children = [header, counts];
+    if (data.clear > 0) {
+      const bulk = el('section', 'bulk');
+      bulk.append(
+        el('strong', '', `問題なしの申請が${data.clear}件あります`),
+        el('p', '', '警告0件・エラー0件の申請だけを、処理直前にもう一度検査してまとめて承認します。')
+      );
+      const approveAll = el('button', 'primary', `問題なし ${data.clear}件をまとめて承認する`);
+      approveAll.onclick = () => approveAllClear(data.clear); bulk.append(approveAll); children.push(bulk);
+    }
+    children.push(list);
+    const addMock = el('section', 'cleanup');
+    addMock.append(
+      el('h2', '', '追加の疑似修正申請を試す'),
+      el('p', '', '今ある疑似申請と操作履歴を残したまま、修正フォームが後から届いた想定の申請を追加します。'),
+      el('p', 'muted', '意図的なエラー・警告は付けません。現在の設定上必要な欠員警告などは表示される場合があります。')
+    );
+    const addMockButton = el('button', '', '疑似の修正申請を追加する');
+    addMockButton.onclick = addMockCorrections;
+    addMock.append(addMockButton); children.push(addMock);
+    const cleanup = el('section', 'cleanup');
+    cleanup.append(
+      el('h2', '', '本物のフォームで動作確認する前に'),
+      el('p', '', '自動生成した疑似回答・疑似申請だけを削除し、実際にGoogleフォームから送信した回答を確認できる空の状態へ戻します。'),
+      el('p', 'muted', '照合用の疑似生徒マスター、フォーム、フォーム項目対応表、競技・ルール設定、登録データ、帳票は残します。実在の生徒データは使用しません。')
+    );
+    const prepareFormTest = el('button', 'primary', '疑似申請を削除して本物のフォーム確認へ');
+    prepareFormTest.onclick = prepareRealFormTest;
+    cleanup.append(prepareFormTest);
+    const deleteMock = el('button', 'danger', '開発用の疑似データを完全に削除する');
+    deleteMock.onclick = deleteAllMockData;
+    cleanup.append(deleteMock); children.push(cleanup);
+    app.replaceChildren(...children);
+  }
+  async function approveAllClear(count) {
+    if (!window.confirm(`問題なしの申請${count}件を、もう一度検査してまとめて承認します。\n\n警告またはエラーが見つかった申請は承認しません。続けますか？`)) return;
+    loading();
+    try {
+      const result = await run('approveAllClearSubmissions');
+      window.alert(result.message);
+      await loadDashboard('ALL');
+    } catch (error) { showFailure(error); }
+  }
+  async function addMockCorrections() {
+    const input = window.prompt('追加する疑似修正申請の件数を、1～100の数字で入力してください。', '5');
+    if (input === null) return;
+    if (!/^\d+$/.test(input.trim()) || Number(input) < 1 || Number(input) > 100) {
+      window.alert('1～100の整数で入力してください。');
+      return;
+    }
+    if (!window.confirm(`今ある疑似申請を残したまま、疑似の修正申請を${Number(input)}件追加しますか？`)) return;
+    loading();
+    try {
+      const result = await run('addMockCorrectionSubmissionsFromUi', Number(input));
+      window.alert(result.message);
+      await loadDashboard('ALL');
+    } catch (error) { showFailure(error); }
+  }
+  async function deleteAllMockData() {
+    const confirmed = window.confirm(
+      '開発用の疑似データをすべて削除します。\n\n'
+      + '削除するもの：疑似生徒マスター、mock-responseで始まる疑似フォーム回答、それに対応する申請・申請項目・検査結果・承認履歴・変更履歴。\n\n'
+      + '残すもの：通常フォーム、修正フォーム、formsフォルダ、競技設定、ルール設定、フォーム設計、フォーム項目対応表、登録データ、帳票。\n\n'
+      + '削除した疑似データは元に戻せません。続けますか？'
+    );
+    if (!confirmed) return;
+    loading();
+    try {
+      const result = await run('deleteDevelopmentWorkbookFromUi');
+      window.alert('開発用の疑似データを削除しました。フォームと設定は残しています。');
+      state.filter = 'ALL';
+      renderDashboard(result);
+    } catch (error) { showFailure(error); }
+  }
+  async function prepareRealFormTest() {
+    const confirmed = window.confirm(
+      '本物のGoogleフォームを使う動作確認へ切り替えます。\n\n'
+      + '削除するもの：自動生成した疑似フォーム回答・疑似申請と、それに対応する申請項目・検査結果・承認履歴・変更履歴。\n\n'
+      + '残すもの：照合用の疑似生徒マスター、通常フォーム、修正フォーム、設定、登録データ、帳票。\n\n'
+      + 'フォームには実在の個人情報を入力せず、疑似生徒マスターの番号と氏名を使ってください。続けますか？'
+    );
+    if (!confirmed) return;
+    loading();
+    try {
+      const result = await run('prepareRealFormTestFromUi');
+      window.alert('自動生成した疑似申請を削除しました。次にGoogleフォームから疑似の番号・氏名で送信してください。');
+      state.filter = 'ALL';
+      renderDashboard(result);
+    } catch (error) { showFailure(error); }
+  }
+  async function loadDetail(id) { loading(); try { renderDetail(await run('getSubmissionDetail', id)); } catch (error) { showFailure(error); } }
+  function renderDetail(detail) {
+    state.detail = detail;
+    const back = el('button', '', '申請一覧へ戻る'); back.onclick = () => loadDashboard();
+    const header = el('header'); header.append(back, el('h1', '', `${detail.submission.targetGrade}年${detail.submission.targetClass}組 ${labels[detail.submission.submissionType] || ''}`), el('p', 'muted', `送信日時：${formatDate(detail.submission.submittedAt)}`));
+    const submitter = el('div', 'submitter');
+    submitter.append(
+      el('strong', '', '入力者と登録対象'),
+      el('p', '', `登録対象クラス：${detail.submission.targetGrade}年${detail.submission.targetClass}組`),
+      el('p', '', `入力者の学籍番号：${detail.submission.submitterStudentId || '未入力'}`),
+      el('p', '', `入力者の氏名：${detail.submission.submitterNameInput || '未入力'}`),
+      el('p', '', `入力者の所属：${classFromStudentId(detail.submission.submitterStudentId)}`)
+    );
+    if (detail.submission.submissionType === 'INITIAL') {
+      submitter.append(el('p', '', `入力区分：${detail.submission.isProxy ? '別のクラスを代理で入力' : '自分のクラスを入力'}`));
+    }
+    if (detail.submission.submissionType === 'CORRECTION') {
+      submitter.append(
+        el('strong', '', '修正申請の理由・変更内容'),
+        el('p', '', detail.responseNote || '未入力（フォーム回答原本を確認してください）')
+      );
+    }
+    header.append(submitter);
+    const hasDuplicates = detail.duplicateCandidates && detail.duplicateCandidates.length > 1;
+    const isRejected = detail.submission.status === 'REJECTED';
+    const rejection = [...(detail.approvalHistory || [])].reverse().find((record) => record.action === 'REJECT' || record.action.includes('不採用'));
+    const summary = el('section', detail.submission.errorCount || hasDuplicates || isRejected ? 'notice error' : 'notice');
+    summary.append(
+      el('strong', '', isRejected ? 'この申請は却下済みです。' : hasDuplicates ? '先に、採用する回答を1件選んでください。' : detail.submission.errorCount ? 'この申請はそのまま承認できません。' : 'この申請は承認できます。'),
+      el('p', '', isRejected ? '内容をもう一度確認する場合は、下の「確認待ちに戻す」を押してください。戻した直後に自動で再検査します。' : hasDuplicates ? '同じクラスの回答を下に並べています。送信日時と選手内容を比べて選んでください。' : detail.submission.errorCount ? '各エラーに表示された登録一覧を確認し、必要な項目を修正してください。' : '警告がある場合は内容を確認してから承認してください。')
+    );
+    if (isRejected && rejection) summary.append(
+      el('strong', '', '前回の却下内容'),
+      el('p', '', `理由：${rejection.reason || '理由の記録なし'}`),
+      el('p', 'muted', `操作：${rejection.actorEmail || '不明'} / ${formatDate(rejection.actedAt)}`)
+    );
+    const badges = el('div', 'badges'); badges.append(badge('warning', detail.submission.warningCount), badge('error', detail.submission.errorCount)); summary.prepend(badges);
+    const issues = el('section', 'list'); issues.append(el('h2', '', '確認する内容'));
+    if (!detail.issues.length) issues.append(el('div', 'empty', '検査で問題は見つかりませんでした。'));
+    const issueNumber = { WARNING: 0, ERROR: 0 };
+    detail.issues.forEach((issue) => {
+      issueNumber[issue.severity] += 1;
+      const number = issueNumber[issue.severity];
+      if (issue.issueCode === 'DUPLICATE_STUDENT') {
+        const duplicateLocations = new Set(String(issue.locationText || '').split('、'));
+        const duplicateItems = detail.items.filter((candidate) =>
+          candidate.normalizedStudentId === issue.currentValue
+          && candidate.registrationState !== 'NOT_PARTICIPATING'
+          && duplicateLocations.has(`${candidate.eventName} / ${candidate.slotName}`));
+        const card = el('article', `issue ${issue.severity.toLowerCase()}`);
+        card.append(
+          el('h3', '', `${issue.severity === 'ERROR' ? 'エラー' : '警告'} ${number}`),
+          el('p', 'message', `問題メッセージ：${issue.displayTitle}`),
+          el('p', '', `重複している登録：${duplicateItems.length}件`)
+        );
+        const list = el('div', 'candidate-list');
+        duplicateItems.forEach((item) => {
+          const row = el('div', 'candidate-item');
+          row.append(
+            el('strong', '', `${item.eventName} / ${item.slotName}`),
+            el('span', '', `学籍番号：${item.studentIdInput || '未入力'}`),
+            el('span', '', `氏名：${item.studentNameInput || '未入力'}`),
+            el('span', 'muted', `登録状態：${registrationStateLabels[item.registrationState] || item.registrationState}`)
+          );
+          if (!isRejected) {
+            const edit = el('button', 'primary', 'この項目を修正');
+            edit.onclick = () => showEditor(item);
+            row.append(edit);
+          }
+          list.append(row);
+        });
+        card.append(list, el('div', 'instruction', `修正方法：${issue.fixInstruction}`));
+        issues.append(card); return;
+      }
+      if (issue.issueCode === 'MULTIPLE_INITIAL_SUBMISSIONS') {
+        const card = el('article', 'issue warning');
+        card.append(
+          el('h3', '', `警告 ${number}`),
+          el('p', 'message', `問題メッセージ：${issue.displayTitle}`),
+          el('div', 'instruction', `対応方法：${issue.fixInstruction}`),
+          buildDuplicateComparison(detail)
+        );
+        issues.append(card); return;
+      }
+      const submissionLevelIssue = issue.issueCode === 'PROXY_SUBMISSION' || !issue.submissionItemId;
+      const item = submissionLevelIssue ? undefined : detail.items.find((candidate) => candidate.submissionItemId === issue.submissionItemId);
+      const card = el('article', `issue ${issue.severity.toLowerCase()}`);
+      card.append(
+        el('h3', '', `${issue.severity === 'ERROR' ? 'エラー' : '警告'} ${number}`),
+        el('p', 'location', `競技：${item?.eventName || issue.locationText}`),
+        el('p', 'location', `場所：${item?.slotName || '申請全体'}`),
+        ...(item ? [el('p', '', `登録状態：${registrationStateLabels[item.registrationState] || item.registrationState}`)] : []),
+        el('p', '', item
+          ? `入力された学籍番号：${item.studentIdInput || '未入力'}`
+          : `問題に関する入力内容：${issue.currentValue || '入力なし'}`),
+        ...(item ? [el('p', '', `入力された氏名：${item.studentNameInput || '未入力'}`)] : []),
+        el('p', 'message', `問題メッセージ：${issue.displayTitle}`),
+        el('div', 'instruction', `修正方法：${issue.fixInstruction}`)
+      );
+      if (issue.issueCode === 'PROXY_SUBMISSION') {
+        card.insertBefore(el('p', '', `入力者の所属：${classFromStudentId(detail.submission.submitterStudentId)}`), card.querySelector('.message'));
+        card.insertBefore(el('p', '', `登録対象クラス：${detail.submission.targetGrade}年${detail.submission.targetClass}組`), card.querySelector('.message'));
+      }
+      if (issue.issueCode === 'STUDENT_CLASS_MISMATCH' && item) {
+        card.insertBefore(el('p', '', `学籍番号から読み取れる所属：${classFromStudentId(item.studentIdInput)}`), card.querySelector('.message'));
+        card.insertBefore(el('p', '', `登録対象クラス：${detail.submission.targetGrade}年${detail.submission.targetClass}組`), card.querySelector('.message'));
+      }
+      if (item && !isRejected) {
+        const open = el('button', 'primary', 'この項目を修正');
+        open.onclick = () => openIssue(issue); card.append(open);
+      }
+      issues.append(card);
+    });
+    const actions = buildActions(detail);
+    app.replaceChildren(header, summary, issues, actions);
+  }
+  function buildDuplicateComparison(detail) {
+    const wrap = el('div', 'comparison');
+    detail.duplicateCandidates.forEach((candidate, index) => {
+      const current = candidate.submission.submissionId === detail.submission.submissionId;
+      const card = el('section', `candidate ${current ? 'current' : ''}`);
+      card.append(
+        el('h4', '', `回答 ${index + 1}${current ? '（現在開いている回答）' : ''}`),
+        el('p', 'muted', `送信日時：${formatDate(candidate.submission.submittedAt)}`),
+        el('p', '', `入力者：${candidate.submission.submitterStudentId || '未入力'} ${candidate.submission.submitterNameInput || '未入力'}`)
+      );
+      const list = el('div', 'candidate-list');
+      candidate.items.forEach((item) => {
+        const row = el('div', 'candidate-item');
+        row.append(
+          el('strong', '', `${item.eventName} / ${item.slotName}`),
+          el('span', '', `学籍番号：${item.studentIdInput || '未入力'}`),
+          el('span', '', `氏名：${item.studentNameInput || '未入力'}`),
+          el('span', 'muted', `登録状態：${registrationStateLabels[item.registrationState] || item.registrationState}`)
+        );
+        list.append(row);
+      });
+      card.append(list);
+      const select = el('button', 'primary', 'この回答を採用する');
+      select.onclick = () => selectDuplicate(candidate.submission);
+      card.append(select); wrap.append(card);
+    });
+    return wrap;
+  }
+  async function selectDuplicate(submission) {
+    if (!window.confirm(`${formatDate(submission.submittedAt)}に送信された回答を採用します。\n\nほかの同一クラス回答は不採用になります。よろしいですか？`)) return;
+    loading();
+    try {
+      await run('selectDuplicateSubmission', submission.submissionId);
+    } catch (error) { showFailure(error); return; }
+    await loadDetail(submission.submissionId);
+  }
+  function showEditor(item) {
+    document.querySelector('.editor')?.remove();
+    const editor = el('section', 'editor');
+    editor.append(el('h2', '', 'この項目を修正'), el('p', 'muted', '修正内容と理由を保存すると、変更前後を変更履歴に記録して再検査します。'));
+    const idLabel = el('label', '', '選手の学籍番号');
+    const idInput = document.createElement('input'); idInput.type = 'text'; idInput.inputMode = 'numeric'; idInput.value = item.studentIdInput;
+    idLabel.append(idInput);
+    const stateLabel = el('label', '', '登録状態');
+    const stateSelect = document.createElement('select');
+    [['REGISTER', '選手を登録する'], ['PENDING', '調整中'], ['NOT_PARTICIPATING', '出場しない']].forEach(([value, label]) => {
+      const option = document.createElement('option'); option.value = value; option.textContent = label; option.selected = item.registrationState === value; stateSelect.append(option);
+    });
+    stateLabel.append(stateSelect);
+    const reasonLabel = el('label', '', '修正理由（必須）');
+    const reasonInput = document.createElement('textarea'); reasonInput.placeholder = '例：代表者が登録状態を最終確認したため'; reasonLabel.append(reasonInput);
+    const actions = el('div', 'form-actions');
+    const cancel = el('button', '', 'キャンセル'); cancel.onclick = () => editor.remove();
+    const save = el('button', 'primary', '保存して再検査');
+    save.onclick = async () => {
+      if (!reasonInput.value.trim()) { window.alert('修正理由を入力してください。'); reasonInput.focus(); return; }
+      save.disabled = true;
+      try {
+        await run('editSubmissionItem', state.detail.submission.submissionId, item.submissionItemId, idInput.value, stateSelect.value, reasonInput.value);
+        await loadDetail(state.detail.submission.submissionId);
+      } catch (error) { showFailure(error); }
+    };
+    actions.append(cancel, save); editor.append(idLabel, stateLabel, reasonLabel, actions); app.append(editor); editor.scrollIntoView({ behavior: 'smooth', block: 'start' });
+  }
+  function buildActions(detail) {
+    const section = el('section'); section.append(el('h2', '', 'この申請をどうしますか'));
+    if (detail.submission.status === 'APPROVED' || detail.submission.status === 'APPLIED') {
+      section.append(el('p', 'notice', detail.submission.status === 'APPLIED'
+        ? 'この申請は承認済みで、登録データと名簿への反映も完了しています。'
+        : 'この申請は承認済みです。次に選手名簿を作成すると登録データへ反映されます。'));
+      const reopen = el('button', detail.submission.status === 'APPLIED' ? 'danger' : '', '承認を取り消して確認待ちに戻す');
+      reopen.onclick = () => act('REOPEN_APPROVED', true);
+      const actions = el('div', 'actions'); actions.append(reopen);
+      section.append(actions, el('p', 'muted', detail.submission.status === 'APPLIED'
+        ? '登録データを残りの名簿反映済み申請から作り直します。作成済みPDFは旧版として残るため、修正・再承認後に新しい名簿版を作成してください。'
+        : '戻す理由と実行者・日時を履歴へ残し、現在の内容を再検査します。'));
+      return section;
+    }
+    if (detail.submission.status === 'REJECTED') {
+      const restore = el('button', 'primary', '確認待ちに戻す');
+      restore.onclick = () => act('RESTORE', true);
+      const actions = el('div', 'actions'); actions.append(restore);
+      section.append(actions, el('p', 'muted', '戻す理由と実行者・日時を履歴へ保存し、現在の入力内容を再検査します。エラーがあれば「修正必要」として戻ります。'));
+      return section;
+    }
+    const isOnHold = detail.submission.status === 'ON_HOLD';
+    const hasDuplicates = detail.duplicateCandidates && detail.duplicateCandidates.length > 1;
+    const approve = el('button', 'primary', isOnHold ? '確認を再開する' : '承認する');
+    approve.disabled = !isOnHold && (detail.submission.errorCount > 0 || hasDuplicates);
+    approve.onclick = () => act(
+      isOnHold ? 'RESUME' : 'APPROVE',
+      !isOnHold && detail.submission.warningCount > 0
+    );
+    const hold = el('button', '', '保留にする'); hold.onclick = () => act('HOLD', false);
+    const reject = el('button', 'danger', '却下する'); reject.onclick = () => act('REJECT', true);
+    const actions = el('div', 'actions'); actions.append(approve); if (!isOnHold) actions.append(hold); actions.append(reject); section.append(actions, el('p', 'muted', hasDuplicates ? '採用する回答を選ぶと、ほかの回答は不採用として履歴に残ります。' : '承認しても、今回の実装範囲では正式名簿と帳票はまだ更新されません。'));
+    return section;
+  }
+  async function openIssue(issue) {
+    const item = state.detail.items.find((candidate) => candidate.submissionItemId === issue.submissionItemId);
+    if (item) { showEditor(item); return; }
+    loading();
+    try {
+      await run('openIssueLocation', state.detail.submission.submissionId, issue.submissionItemId || '');
+      google.script.host.close();
+    } catch (error) { showFailure(error); }
+  }
+  async function act(action, needsReason) {
+    let reason = '';
+    if (needsReason) {
+      const promptText = action === 'RESTORE'
+        ? '確認待ちに戻す理由を入力してください。'
+        : action === 'REOPEN_APPROVED'
+          ? '承認を取り消して確認待ちに戻す理由を入力してください。'
+        : action === 'APPROVE'
+          ? '警告を確認したうえで承認する理由を入力してください。\n例：欠員で正しいことを担当者へ確認済み'
+          : '却下する理由を入力してください。';
+      reason = window.prompt(promptText, '') || '';
+      if (!reason.trim()) return;
+    }
+    const message = { APPROVE: 'この申請を承認しますか。', HOLD: 'この申請を保留にしますか。', REJECT: 'この申請を却下しますか。', RESUME: 'この申請の確認を再開しますか。', RESTORE: '却下済み申請を確認待ちへ戻し、もう一度検査しますか。', REOPEN_APPROVED: state.detail.submission.status === 'APPLIED' ? 'この申請は名簿反映済みです。承認を取り消すと登録データを作り直します。作成済みPDFは旧版として残ります。続けますか。' : 'この申請の承認を取り消し、確認待ちへ戻してもう一度検査しますか。' }[action];
+    if (!window.confirm(message)) return;
+    loading();
+    try { await run('performSubmissionAction', state.detail.submission.submissionId, action, reason); await loadDashboard('ALL'); } catch (error) { showFailure(error); }
+  }
+  function formatDate(value) { const d = new Date(value); return Number.isNaN(d.getTime()) ? value : new Intl.DateTimeFormat('ja-JP', { dateStyle: 'short', timeStyle: 'short', timeZone: 'Asia/Tokyo' }).format(d); }
+  loadDashboard(state.filter);
+</script></body></html>

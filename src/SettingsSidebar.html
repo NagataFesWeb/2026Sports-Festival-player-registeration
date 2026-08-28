@@ -1,0 +1,206 @@
+<!doctype html>
+<html lang="ja">
+<head>
+  <base target="_top">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <?!= uiTokens ?>
+  <style>
+    * { box-sizing: border-box; }
+    body { margin: 0; background: var(--color-paper); color: var(--color-ink); font: 16px/1.6 var(--font-ui); }
+    button, a { font: inherit; }
+    button, .button {
+      width: 100%; min-height: 44px; display: inline-flex; align-items: center; justify-content: center;
+      padding: var(--space-2) var(--space-3); border: 1px solid var(--color-track);
+      border-radius: var(--radius-control); background: var(--color-field); color: var(--color-ink);
+      text-decoration: none; cursor: pointer; font-weight: 700;
+      transition: transform var(--motion-fast), border-color var(--motion-fast), background var(--motion-fast);
+    }
+    button:hover, .button:hover { border-color: var(--color-primary); }
+    button:active, .button:active { transform: translateY(1px); }
+    button:focus-visible, a:focus-visible { outline: 3px solid var(--color-focus); outline-offset: 2px; }
+    button:disabled { cursor: not-allowed; opacity: .48; transform: none; }
+    .primary { background: var(--color-primary); border-color: var(--color-primary); color: var(--color-field); }
+    .primary:hover { background: var(--color-primary-dark); }
+    .shell { width: 100%; max-width: 680px; margin: auto; padding: var(--space-4); padding-bottom: max(var(--space-8), env(safe-area-inset-bottom)); }
+    header { border-bottom: 4px solid var(--color-primary); padding-bottom: var(--space-3); margin-bottom: var(--space-4); }
+    h1 { margin: 0; font-size: 1.35rem; line-height: 1.35; }
+    h2 { margin: 0; font-size: 1.05rem; }
+    h3 { margin: 0; font-size: 1rem; }
+    p { margin: var(--space-2) 0; }
+    .muted { color: var(--color-muted); font-size: .9rem; }
+    .status { display: flex; flex-wrap: wrap; gap: var(--space-2); margin-top: var(--space-3); }
+    .pill { padding: 2px 9px; border-radius: 999px; background: var(--color-primary-soft); color: var(--color-primary-dark); font-size: .82rem; font-weight: 700; }
+    .hero { background: var(--color-field); border: 2px solid var(--color-primary); border-left-width: 9px; border-radius: var(--radius-card); padding: var(--space-4); margin-bottom: var(--space-6); }
+    .hero.error { border-color: var(--color-danger); }
+    .hero.warning { border-color: var(--color-warning); }
+    .hero .primary { margin-top: var(--space-3); }
+    .hero .primary + button { margin-top: var(--space-2); }
+    .explanation { margin: var(--space-3) 0; padding: var(--space-3); background: var(--color-primary-soft); border-left: 7px solid var(--color-primary); border-radius: var(--radius-control); }
+    .explanation strong { display: block; margin-bottom: var(--space-1); }
+    .explanation ul { margin: var(--space-2) 0 0; padding-left: 1.4em; }
+    .explanation li + li { margin-top: var(--space-1); }
+    .explanation .caution { margin-top: var(--space-2); color: var(--color-primary-dark); font-weight: 700; }
+    .summary { display: grid; grid-template-columns: 1fr 1fr; gap: var(--space-2); margin-bottom: var(--space-6); }
+    .metric { background: var(--color-field); border: 1px solid var(--color-track); border-radius: var(--radius-control); padding: var(--space-3); }
+    .metric strong { display: block; font-size: 1.2rem; }
+    .metric.error strong { color: var(--color-danger); }
+    .metric.warning strong { color: var(--color-warning); }
+    .lane { position: relative; display: grid; gap: var(--space-3); margin: var(--space-3) 0 var(--space-6); padding-left: var(--space-4); border-left: 7px solid var(--color-track); }
+    .step { background: var(--color-field); border: 1px solid var(--color-track); border-radius: var(--radius-card); padding: var(--space-4); }
+    .step.current { border-color: var(--color-primary); background: var(--color-primary-soft); }
+    .step.blocked { opacity: .68; }
+    .step > button, .step > .button { margin-top: var(--space-3); }
+    .step-title { display: flex; align-items: baseline; gap: var(--space-2); }
+    .number { color: var(--color-primary-dark); font-weight: 700; }
+    .grid { display: grid; gap: var(--space-2); margin-top: var(--space-3); }
+    .issues { display: grid; gap: var(--space-3); margin-top: var(--space-3); }
+    .issue { background: var(--color-field); border: 1px solid var(--color-track); border-left: 7px solid var(--color-warning); border-radius: var(--radius-card); padding: var(--space-3); }
+    .issue.error { border-left-color: var(--color-danger); }
+    .issue button { margin-top: var(--space-2); }
+    .notice { padding: var(--space-3); border-left: 7px solid var(--color-danger); background: var(--color-danger-bg); border-radius: var(--radius-control); }
+    .progress-label { display: flex; justify-content: space-between; gap: var(--space-2); margin-top: var(--space-3); font-weight: 700; }
+    .progress-track { width: 100%; height: 20px; overflow: hidden; margin-top: var(--space-1); border: 1px solid var(--color-track); border-radius: 999px; background: var(--color-primary-soft); }
+    .progress-bar { height: 100%; min-width: 0; border-radius: inherit; background: var(--color-primary); transition: width var(--motion-fast); }
+    .spinner { width: 28px; height: 28px; margin: var(--space-8) auto; border: 4px solid var(--color-track); border-top-color: var(--color-primary); border-radius: 50%; animation: spin .8s linear infinite; }
+    @keyframes spin { to { transform: rotate(360deg); } }
+    @media (min-width: 560px) { .summary { grid-template-columns: repeat(4, 1fr); } .grid.two { grid-template-columns: 1fr 1fr; } }
+    @media (prefers-reduced-motion: reduce) { *, *::before, *::after { animation-duration: .01ms !important; transition-duration: .01ms !important; scroll-behavior: auto !important; } }
+  </style>
+</head>
+<body><main id="app" class="shell" aria-live="polite"></main>
+<script>
+  const app = document.getElementById('app');
+  function el(tag, className, text) { const node = document.createElement(tag); if (className) node.className = className; if (text !== undefined) node.textContent = String(text); return node; }
+  function run(name, ...args) { return new Promise((resolve, reject) => google.script.run.withSuccessHandler(resolve).withFailureHandler(reject)[name](...args)); }
+  function loading(label = '設定を確認しています') { const box = el('div'); box.append(el('div', 'spinner'), el('p', 'muted', label)); app.replaceChildren(box); }
+  function failure(error) { const box = el('div', 'notice'); box.append(el('strong', '', '処理を続けられませんでした'), el('p', '', error?.message || 'スプレッドシートを開き直して、もう一度お試しください。')); const retry = el('button', '', 'もう一度確認する'); retry.onclick = load; box.append(retry); app.replaceChildren(box); }
+  function action(label, className, handler) { const button = el('button', className, label); button.onclick = handler; return button; }
+  function explanation(title, items, caution) { const box = el('div', 'explanation'); box.append(el('strong', '', title)); const list = el('ul'); items.forEach(item => list.append(el('li', '', item))); box.append(list); if (caution) box.append(el('p', 'caution', caution)); return box; }
+  async function load() { loading(); try { render(await run('getSettingsDashboardData')); } catch (error) { failure(error); } }
+  async function execute(name, label) { loading(label); try { render(await run(name)); } catch (error) { failure(error); } }
+  async function advanceDraft() { try { render(await run('advanceDraftFormCreationFromUi')); } catch (error) { failure(error); } }
+  function formatUpdatedAt(value) { if (!value) return ''; const date = new Date(value); return Number.isNaN(date.getTime()) ? value : date.toLocaleTimeString('ja-JP'); }
+  async function openSheet(name) { try { await run('openSettingsSheetFromUi', name); } catch (error) { failure(error); } }
+  async function openIssue(issue) { try { await run('openSettingsIssueFromUi', issue.category, issue.rowNumber); } catch (error) { failure(error); } }
+  function openFirstIssue(data, severity) { const issue = data.issues.find(candidate => candidate.severity === severity); if (issue) openIssue(issue); }
+
+  function render(data) {
+    const header = el('header');
+    header.append(el('h1', '', 'フォーム準備'), el('p', 'muted', '上から順に進めると、配布前のフォームが完成します。'));
+    const status = el('div', 'status'); status.append(el('span', 'pill', `${data.year}年度`), el('span', 'pill', `現在：${data.formStatus}`)); header.append(status);
+    if (data.setupRequired) {
+      const hero = el('section', 'hero');
+      hero.append(el('h2', '', '最初に、フォームを作るための設定欄を準備します'));
+      hero.append(explanation('このボタンで行うこと', [
+        '「競技設定」「ルール設定」「フォーム設計」など、フォーム準備に必要なシートを追加します。',
+        '空の設定シートには、書き方の見本となる疑似の競技・ルールを入れます。',
+        'すでに入力してある設定行は消さず、不足しているシート・見出し・選択欄だけを補います。',
+        '最後に設定内容を点検し、直す場所があれば分かりやすく表示します。',
+      ], 'この操作だけではGoogleフォームを作らず、申請・登録データ・帳票も変更しません。'));
+      hero.append(action('設定シートを作成・不足分を補う', 'primary', prepareSettings));
+      app.replaceChildren(header, hero); return;
+    }
+
+    const hero = nextAction(data);
+    const summary = el('section', 'summary');
+    [['競技', `${data.enabledEventCount}件`, ''], ['有効ルール', `${data.enabledRuleCount}件`, ''], ['警告', `${data.warningCount}件`, 'warning'], ['エラー', `${data.errorCount}件`, 'error']]
+      .forEach(([label, value, kind]) => { const box = el('div', `metric ${kind}`); box.append(el('span', 'muted', label), el('strong', '', value)); summary.append(box); });
+    const steps = buildSteps(data);
+    const children = [header, hero, summary, steps];
+    if (data.issues.length) children.push(buildIssues(data.issues));
+    app.replaceChildren(...children);
+    if (data.formBuildActive && data.formBuildStatus === 'RUNNING') window.setTimeout(advanceDraft, 5000);
+  }
+
+  function nextAction(data) {
+    const box = el('section', `hero ${data.errorCount ? 'error' : data.warningCount ? 'warning' : ''}`);
+    if (data.formBuildActive) {
+      box.className = `hero ${data.formBuildStatus === 'ERROR' ? 'error' : ''}`;
+      box.append(el('h2', '', data.formBuildStatus === 'ERROR' ? 'フォーム作成が途中で止まりました' : 'フォームを分割して作成中です'));
+      const progressLabel = el('div', 'progress-label');
+      progressLabel.append(el('span', '', '全体の進み具合'), el('span', '', `${data.formBuildPercent}%`));
+      const progressTrack = el('div', 'progress-track');
+      progressTrack.setAttribute('role', 'progressbar');
+      progressTrack.setAttribute('aria-label', 'フォーム作成の進み具合');
+      progressTrack.setAttribute('aria-valuemin', '0');
+      progressTrack.setAttribute('aria-valuemax', '100');
+      progressTrack.setAttribute('aria-valuenow', String(data.formBuildPercent));
+      const progressBar = el('div', 'progress-bar');
+      progressBar.style.width = `${Math.max(0, Math.min(100, Number(data.formBuildPercent) || 0))}%`;
+      progressTrack.append(progressBar);
+      box.append(progressLabel, progressTrack, el('p', 'muted', `${data.formBuildCompleted}/${data.formBuildTotal}区切り完了`));
+      box.append(el('p', '', data.formBuildProgress), el('p', 'muted', data.formBuildMessage));
+      if (data.formBuildUpdatedAt) box.append(el('p', 'muted', `最終更新：${formatUpdatedAt(data.formBuildUpdatedAt)}`));
+      if (data.formBuildStatus === 'RUNNING') box.append(el('p', 'muted', 'この画面を開いている間は、約5秒ごとに最大8区切りまとめて進みます。画面を閉じてもバックグラウンドで続きます。'));
+      if (data.formBuildStatus === 'ERROR') box.append(action('中断した場所から再開する', 'primary', () => execute('resumeDraftFormCreationFromUi', 'フォーム作成を再開しています')));
+      box.append(action('途中の作成を取り消す', '', cancelDraft));
+    } else if (data.errorCount) {
+      box.append(el('h2', '', '次は、設定のエラーを直します'), el('p', '', '最初のエラー箇所を開きます。表示された行を直したら、もう一度点検してください。'));
+      box.append(action('最初のエラー箇所を開く', 'primary', () => openFirstIssue(data, 'ERROR')));
+    } else if (data.formStatus === '公開前確認' && data.normalEditUrl) {
+      box.append(el('h2', '', '次は、できたフォームを確認します'), el('p', '', '通常フォームを開き、競技名・人数・学年を確認してください。まだ生徒には公開されません。'));
+      const link = el('a', 'button primary', '通常フォームの下書きを開く'); link.href = data.normalEditUrl; link.target = '_blank'; box.append(link);
+      box.append(action('確認済みの2フォームを公開する', 'primary', publishDraft));
+      box.append(action('公開前フォームを破棄する', '', discardDraft));
+    } else if (data.warningCount) {
+      box.append(el('h2', '', '次は、警告の内容を確認します'), el('p', '', '警告は確認後に進めます。内容が意図どおりか確かめてください。'));
+      box.append(action('最初の警告箇所を開く', 'primary', () => openFirstIssue(data, 'WARNING')));
+    } else {
+      box.append(el('h2', '', '設定は整っています'), el('p', '', '現在の設定から、通常登録と修正申請の下書きを新しく作ります。'));
+      box.append(action('2つのフォーム下書きを作る', 'primary', buildDraft));
+    }
+    return box;
+  }
+
+  function buildSteps(data) {
+    const wrap = el('section'); wrap.append(el('h2', '', '準備の流れ'));
+    const lane = el('div', 'lane');
+    const step1 = step('1', '競技とルールを入力', '競技名・人数・対象学年と、TRUEなら問題なしになる論理式を確認します。', data.errorCount ? 'current' : '');
+    const edit = el('div', 'grid'); edit.append(action('競技設定を開く', '', () => openSheet('競技設定')), action('ルール設定を開く', '', () => openSheet('ルール設定')), action('タイトル・年度を開く', '', () => openSheet('フォーム設計'))); step1.append(edit);
+    const step2 = step('2', '入力内容を点検', data.errorCount ? `エラーが${data.errorCount}件あります。直してから再点検します。` : '現在の設定はフォームを作成できる状態です。', data.errorCount ? '' : 'current');
+    step2.append(action('設定をもう一度点検する', data.errorCount ? 'primary' : '', () => execute('validateSettingsFromUi', '設定を点検しています')));
+    const step3Description = data.formBuildActive ? `${data.formBuildProgress}。完了まで画面を閉じても構いません。` : data.formStatus === '公開前確認' ? '下書き作成済みです。開いて内容を確認します。' : 'エラー0件になると作成できます。';
+    const step3 = step('3', 'フォーム下書きを作成', step3Description, data.errorCount ? 'blocked' : data.formBuildActive || data.formStatus === '公開前確認' ? 'current' : '');
+    if (data.formBuildActive) {
+      if (data.formBuildStatus === 'ERROR') step3.append(action('作成を再開する', 'primary', () => execute('resumeDraftFormCreationFromUi', 'フォーム作成を再開しています')));
+      step3.append(action('途中の作成を取り消す', '', cancelDraft));
+    } else if (data.formStatus === '公開前確認' && data.normalEditUrl) {
+      const links = el('div', 'grid two');
+      const normal = el('a', 'button primary', '通常フォームを開く'); normal.href = data.normalEditUrl; normal.target = '_blank';
+      const correction = el('a', 'button', '修正フォームを開く'); correction.href = data.correctionEditUrl; correction.target = '_blank'; links.append(normal, correction); step3.append(links);
+      if (data.formsFolderUrl) { const folder = el('a', 'button', 'formsフォルダを開く'); folder.href = data.formsFolderUrl; folder.target = '_blank'; step3.append(folder); }
+      step3.append(action('公開前フォームを破棄する', '', discardDraft));
+    } else { const build = action('フォーム下書きを作る', 'primary', buildDraft); build.disabled = !data.canBuildDraft; step3.append(build); }
+    const published = data.formStatus === '公開中';
+    const step4 = step('4', '確認して公開', published ? '公開中です。フォーム回答は自動で取り込まれます。' : '2つのフォームを確認してから公開します。', published ? 'done' : data.formStatus === '公開前確認' ? 'current' : 'blocked');
+    if (data.formStatus === '公開前確認') step4.append(action('確認済みの2フォームを公開する', 'primary', publishDraft));
+    lane.append(step1, step2, step3, step4); wrap.append(lane); return wrap;
+  }
+
+  function step(number, title, description, state) { const box = el('article', `step ${state}`); const heading = el('div', 'step-title'); heading.append(el('span', 'number', number), el('h3', '', title)); box.append(heading, el('p', 'muted', description)); return box; }
+  function buildIssues(issues) {
+    const wrap = el('section'); wrap.append(el('h2', '', '直す場所'));
+    const list = el('div', 'issues');
+    issues.slice(0, 5).forEach((issue) => { const card = el('article', `issue ${issue.severity === 'ERROR' ? 'error' : ''}`); card.append(el('strong', '', `${issue.severity === 'ERROR' ? 'エラー' : '警告'}：${issue.title}`), el('p', 'muted', `${issue.category}${issue.rowNumber ? ` ${issue.rowNumber}行目` : ''}`), el('p', '', issue.instruction)); card.append(action('この場所を開く', '', () => openIssue(issue))); list.append(card); });
+    if (issues.length > 5) list.append(action(`残り${issues.length - 5}件を一覧で見る`, '', () => openSheet('設定点検結果')));
+    wrap.append(list); return wrap;
+  }
+  function buildDraft() { if (!window.confirm('現在の設定から、新しい非公開フォームを2つ作ります。よろしいですか？')) return; execute('buildDraftFormsFromUi', 'フォーム下書きを作っています'); }
+  function publishDraft() { if (!window.confirm('確認済みの通常フォームと修正フォームを公開し、回答取込を開始します。よろしいですか？')) return; execute('publishDraftFormsFromUi', 'フォームを公開しています'); }
+  function discardDraft() { if (!window.confirm('公開前の2フォームを破棄します。現在使用中のフォームは停止しません。よろしいですか？')) return; execute('discardPreparedFormsFromUi', '公開前フォームを破棄しています'); }
+  function prepareSettings() {
+    if (!window.confirm('フォーム準備に必要な設定シートを追加します。\n\nすでに入力してある設定行は消しません。Googleフォーム、申請、登録データ、帳票も変更しません。続けますか？')) return;
+    execute('prepareSettingsFromUi', '設定シートを準備しています');
+  }
+  function rebuildDraft() {
+    if (!window.confirm('現在の設定から、新しい非公開フォームを2つ作り直します。\n\n新しいフォームの作成後、古いフォームは回答送信トリガーを解除してゴミ箱へ移動します。よろしいですか？')) return;
+    execute('buildDraftFormsFromUi', 'フォーム下書きを作り直しています');
+  }
+  function cancelDraft() {
+    if (!window.confirm('作成途中の新しいフォーム2つをゴミ箱へ移動し、現在使用中のフォームはそのまま残します。取り消しますか？')) return;
+    execute('cancelDraftFormCreationFromUi', '途中のフォームを片付けています');
+  }
+  load();
+</script>
+</body>
+</html>
