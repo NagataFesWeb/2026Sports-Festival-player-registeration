@@ -5,6 +5,9 @@ import {
   assertRosterJobCanStart, normalizeRosterInputName, planRosterJobStep, ROSTER_REPORT_NAMES,
   selectRosterVersionName,
   buildEventRosterPages, eventRosterPageTitle, type EventRosterPage,
+  diffRosterRegistrations, gradeRosterSheetName, planEventRosterSheetNames,
+  replaceRosterMetadataVersion, selectAffectedRosterPages, shouldRebuildWholeReport,
+  type RosterBaselineRow, type RosterDiff,
 } from '../core/roster';
 import { validateSubmission } from '../core/validation';
 import { REGISTRATION_HEADERS, SCRIPT_PROPERTIES, SHEETS } from '../shared/constants';
@@ -14,6 +17,7 @@ import {
   assertMockRosterSourceConsistent,
   ensureApplicationSheets,
   readItems,
+  readRosterHistory,
   readStudents,
   readSubmissions,
   replaceRegistrations,
@@ -57,10 +61,36 @@ export interface CreateRosterResult {
   files: CreatedRosterFile[];
   processing: boolean;
   message: string;
+  /** 差分作成のときだけ入る、複製元の版名。 */
+  baseVersionName?: string;
+  /** 差分作成のときだけ入る、前回の版から変わった選手枠の数。 */
+  changedCount?: number;
+}
+
+/** 「変更点だけを反映して選手名簿を作成」を押す前に見せる下調べの結果。 */
+export interface RosterDiffPreview {
+  canRun: boolean;
+  baseVersionName: string;
+  nextVersionName: string;
+  addedCount: number;
+  removedCount: number;
+  changedCount: number;
+  totalCount: number;
+  /** 書き直しが必要な競技名。個人名は含めない。 */
+  affectedEventNames: string[];
+  message: string;
 }
 
 interface RosterJobState {
   reportPlanVersion?: number;
+  /**
+   * `FULL`は全ファイルを新規に作る。`DIFF`は前回の版のファイルを複製し、
+   * 変わったシートだけを書き直す。古い作りかけの状態には無いため、省略時は`FULL`とみなす。
+   */
+  mode?: 'FULL' | 'DIFF';
+  /** `DIFF`のときの複製元。 */
+  baseFolderId?: string;
+  baseVersionName?: string;
   jobId: string;
   inputName: string;
   versionName: string;
@@ -422,24 +452,6 @@ function writeGradeRosterSheet(
   });
 }
 
-function safeSheetName(value: string): string {
-  const normalized = value.replace(/[\\/?*[\]:]/g, '-').trim() || '名称未設定';
-  return normalized.slice(0, 95);
-}
-
-function uniqueSheetName(
-  book: GoogleAppsScript.Spreadsheet.Spreadsheet, desired: string, eventId: string,
-): string {
-  const base = safeSheetName(desired);
-  if (!book.getSheetByName(base)) return base;
-  const suffix = `_${safeSheetName(eventId)}`;
-  const candidate = `${base.slice(0, Math.max(1, 100 - suffix.length))}${suffix}`;
-  if (!book.getSheetByName(candidate)) return candidate;
-  let index = 2;
-  while (book.getSheetByName(`${candidate.slice(0, 96)}_${index}`)) index += 1;
-  return `${candidate.slice(0, 96)}_${index}`;
-}
-
 function gradesForEvent(event: EventSetting): (1 | 2 | 3)[] {
   return ([1, 2, 3] as const).filter((grade) =>
     event.targetGrade === '全学年' || event.targetGrade === `${grade}年`);
@@ -530,25 +542,32 @@ function writeEventRosterSheets(
   createdAt: string,
   report: '種目別' | '当日変更用',
 ): void {
-  buildEventRosterPages(events).forEach((page) => {
-    const sheet = book.insertSheet(
-      uniqueSheetName(book, eventRosterPageTitle(page), page.events[0]?.eventId ?? ''),
-    );
+  const pages = buildEventRosterPages(events);
+  const sheetNames = planEventRosterSheetNames(pages);
+  pages.forEach((page, index) => {
+    const sheet = book.insertSheet(sheetNames[index]!);
     writeEventRosterSheet(sheet, page, versionName, registrations, students, createdAt, report);
   });
 }
+
+/** 帳票へ実際に印字した内容を残す隠しシート。差分作成のときの比較元になる。 */
+const ROSTER_SYSTEM_SHEET = '_管理用データ';
+const ROSTER_INDEX_SHEET = '自分の競技を探す';
+const ROSTER_SYSTEM_HEADERS = [
+  'registration_id', 'event_id', 'event_name', 'slot_id', 'slot_name',
+  'grade', 'class_number', 'student_id', 'student_name', 'gender', 'source_version',
+  'correction_source',
+] as const;
 
 function writeSystemDataSheet(
   book: GoogleAppsScript.Spreadsheet.Spreadsheet,
   registrations: Registration[],
   correctionSubmissionIds: Set<string>,
 ): void {
-  const sheet = book.insertSheet('_管理用データ');
-  const headers = [
-    'registration_id', 'event_id', 'event_name', 'slot_id', 'slot_name',
-    'grade', 'class_number', 'student_id', 'student_name', 'gender', 'source_version',
-    'correction_source',
-  ];
+  const existing = book.getSheetByName(ROSTER_SYSTEM_SHEET);
+  if (existing) book.deleteSheet(existing);
+  const sheet = book.insertSheet(ROSTER_SYSTEM_SHEET);
+  const headers = [...ROSTER_SYSTEM_HEADERS];
   const rows = registrations.map((row) => [
     row.registrationId, row.eventId, row.eventName, row.slotId, row.slotName,
     row.grade, row.classNumber, row.studentId, row.studentNameSnapshot,
@@ -560,14 +579,21 @@ function writeSystemDataSheet(
   sheet.hideSheet();
 }
 
+/**
+ * 修正フォーム由来の選手枠へ色と補足を付ける。
+ *
+ * 差分作成では書き直したシートだけを渡す。触っていないシートには前の版で付けた色が
+ * そのまま残っており、中身が変わっていない以上その色は今も正しいため、付け直さない。
+ * 全シートを走査すると`createTextFinder`が枠の数だけ走り、複製で稼いだ時間を使い切る。
+ */
 function highlightCorrectionRegistrations(
-  book: GoogleAppsScript.Spreadsheet.Spreadsheet,
+  sheets: GoogleAppsScript.Spreadsheet.Sheet[],
   registrations: Registration[],
   correctionSubmissionIds: Set<string>,
 ): void {
   const corrected = registrations.filter((row) => correctionSubmissionIds.has(row.sourceSubmissionId));
   if (corrected.length === 0) return;
-  book.getSheets().filter((sheet) => sheet.getName() !== '_管理用データ').forEach((sheet) => {
+  sheets.filter((sheet) => sheet.getName() !== ROSTER_SYSTEM_SHEET).forEach((sheet) => {
     corrected.forEach((registration) => {
       const matches = sheet.createTextFinder(registration.studentId).matchCase(true).findAll();
       matches.forEach((range) => {
@@ -713,10 +739,192 @@ function writeReport(
       `招集順 ${grade}年`,
     ));
   }
-  highlightCorrectionRegistrations(book, displaySorted, correctionSubmissionIds);
+  highlightCorrectionRegistrations(book.getSheets(), displaySorted, correctionSubmissionIds);
   writeSystemDataSheet(book, displaySorted, correctionSubmissionIds);
   book.setActiveSheet(indexSheet);
   return { name: report, url: book.getUrl() };
+}
+
+// ------------------------------------------------------- 差分で名簿を作り直す
+
+/** 差分作成をあきらめて全面作成へ切り替える理由。利用者へは出さず、状況シートの補足に使う。 */
+type RosterPatchFallback =
+  | 'BASE_FILE_MISSING' | 'BASE_DATA_MISSING' | 'SHEET_LAYOUT_CHANGED' | 'TOO_MANY_CHANGES';
+
+interface RosterPatchResult {
+  file?: CreatedRosterFile;
+  fallback?: RosterPatchFallback;
+  rewrittenSheetCount?: number;
+}
+
+/**
+ * 帳票の`_管理用データ`から、その版に印字されている選手枠を読む。
+ * 列は名前で引く。将来列が増えても差分作成が壊れないようにするため。
+ */
+function readRosterSystemData(
+  book: GoogleAppsScript.Spreadsheet.Spreadsheet,
+): RosterBaselineRow[] | undefined {
+  const sheet = book.getSheetByName(ROSTER_SYSTEM_SHEET);
+  if (!sheet || sheet.getLastRow() < 1 || sheet.getLastColumn() < 1) return undefined;
+  const width = sheet.getLastColumn();
+  const headers = sheet.getRange(1, 1, 1, width).getDisplayValues()[0] ?? [];
+  const columnOf = (name: string): number => headers.indexOf(name);
+  const required = [
+    'registration_id', 'event_id', 'grade', 'class_number', 'student_id', 'student_name', 'gender',
+  ];
+  if (required.some((name) => columnOf(name) < 0)) return undefined;
+  if (sheet.getLastRow() < 2) return [];
+  return sheet.getRange(2, 1, sheet.getLastRow() - 1, width).getDisplayValues()
+    .filter((row) => String(row[columnOf('registration_id')] ?? '') !== '')
+    .map((row) => ({
+      registrationId: String(row[columnOf('registration_id')] ?? ''),
+      eventId: String(row[columnOf('event_id')] ?? ''),
+      grade: Number(row[columnOf('grade')] ?? 0),
+      classNumber: Number(row[columnOf('class_number')] ?? 0),
+      studentId: String(row[columnOf('student_id')] ?? ''),
+      studentName: String(row[columnOf('student_name')] ?? ''),
+      genderLabel: String(row[columnOf('gender')] ?? ''),
+    }));
+}
+
+/**
+ * シートを同じ位置へ作り直す。複製元の行の高さ・結合・メモ・背景色が残ったまま
+ * 上書きすると体裁が混ざるため、消してから入れ直す。並び順は印刷順なので位置を保つ。
+ */
+function replaceSheetInPlace(
+  book: GoogleAppsScript.Spreadsheet.Spreadsheet, name: string,
+): GoogleAppsScript.Spreadsheet.Sheet {
+  const existing = book.getSheetByName(name);
+  const position = existing ? existing.getIndex() - 1 : book.getNumSheets();
+  if (existing) book.deleteSheet(existing);
+  const sheet = book.insertSheet(position);
+  sheet.setName(name);
+  return sheet;
+}
+
+function rosterCreatedLabel(createdAt: string): string {
+  return Utilities.formatDate(new Date(createdAt), 'Asia/Tokyo', 'yyyy/MM/dd HH:mm');
+}
+
+/** 書き直さないシートの見出しにある版名と作成日時だけを新しい版へそろえる。 */
+function restampRosterSheet(sheet: GoogleAppsScript.Spreadsheet.Sheet, versionName: string, createdAt: string): void {
+  const cell = sheet.getRange(3, 1);
+  const updated = replaceRosterMetadataVersion(cell.getDisplayValue(), versionName, rosterCreatedLabel(createdAt));
+  if (updated) cell.setValue(updated);
+}
+
+function findFileInFolder(
+  folder: GoogleAppsScript.Drive.Folder, name: string,
+): GoogleAppsScript.Drive.File | undefined {
+  const files = folder.getFilesByName(name);
+  return files.hasNext() ? files.next() : undefined;
+}
+
+/**
+ * 前回の版の帳票を複製し、変わったシートだけを書き直す。
+ *
+ * 比較元は複製したファイル自身の`_管理用データ`にする。`登録データ`は承認取消のあとに
+ * 作り直されるため、すでに配った帳票の中身とは一致しないことがある。
+ *
+ * 差分で作れないと分かった時点で複製を捨て、`fallback`を返す。呼び出し側は全面作成へ切り替える。
+ */
+function patchReportFromBase(
+  report: '種目別' | 'クラス別・招集順' | '当日変更用',
+  baseFolder: GoogleAppsScript.Drive.Folder,
+  baseVersionName: string,
+  versionFolder: GoogleAppsScript.Drive.Folder,
+  versionName: string,
+  registrations: Registration[],
+  events: EventSetting[],
+  students: Student[],
+  createdAt: string,
+  correctionSubmissionIds: Set<string>,
+): RosterPatchResult {
+  const baseFile = findFileInFolder(baseFolder, `${baseVersionName}_${report}選手名簿`);
+  if (!baseFile) return { fallback: 'BASE_FILE_MISSING' };
+
+  const copy = baseFile.makeCopy(`${versionName}_${report}選手名簿`, versionFolder);
+  const discard = (fallback: RosterPatchFallback): RosterPatchResult => {
+    try { copy.setTrashed(true); } catch { /* 全面作成でやり直すため、後始末の失敗は無視する */ }
+    return { fallback };
+  };
+
+  const book = SpreadsheetApp.openById(copy.getId());
+  const baseline = readRosterSystemData(book);
+  if (!baseline) return discard('BASE_DATA_MISSING');
+  if (!book.getSheetByName(ROSTER_INDEX_SHEET)) return discard('SHEET_LAYOUT_CHANGED');
+
+  const diff = diffRosterRegistrations(baseline, registrations);
+  const displayEvents = [...events].sort((left, right) =>
+    left.displayOrder - right.displayOrder || left.assemblyOrder - right.assemblyOrder);
+  const displaySorted = sortedRegistrations(
+    registrations, report === 'クラス別・招集順' ? 'クラス別' : report, events,
+  );
+
+  const rewritten: GoogleAppsScript.Spreadsheet.Sheet[] = [];
+  if (report === '種目別' || report === '当日変更用') {
+    const pages = buildEventRosterPages(displayEvents);
+    const sheetNames = planEventRosterSheetNames(pages);
+    // 競技を足した・消した・並べ替えた場合は、前回のシートと今回のページが対応しない。
+    const existing = book.getSheets().map((sheet) => sheet.getName())
+      .filter((name) => name !== ROSTER_SYSTEM_SHEET && name !== ROSTER_INDEX_SHEET);
+    const sameLayout = existing.length === sheetNames.length
+      && sheetNames.every((name, index) => existing[index] === name);
+    if (!sameLayout) return discard('SHEET_LAYOUT_CHANGED');
+
+    const affected = selectAffectedRosterPages(pages, diff.affectedEventIds);
+    if (shouldRebuildWholeReport(affected.length, pages.length)) return discard('TOO_MANY_CHANGES');
+    affected.forEach((index) => {
+      const sheet = replaceSheetInPlace(book, sheetNames[index]!);
+      writeEventRosterSheet(
+        sheet, pages[index]!, versionName, displaySorted, students, createdAt, report,
+      );
+      rewritten.push(sheet);
+    });
+  } else {
+    const layouts = ['クラス別', '招集順'] as const;
+    const gradeNames = layouts.flatMap((layout) =>
+      [1, 2, 3].map((grade) => gradeRosterSheetName(layout, grade)));
+    if (gradeNames.some((name) => !book.getSheetByName(name))) return discard('SHEET_LAYOUT_CHANGED');
+
+    const affectedGrades = diff.affectedGrades.filter((grade) => [1, 2, 3].includes(grade));
+    if (shouldRebuildWholeReport(affectedGrades.length * layouts.length, gradeNames.length)) {
+      return discard('TOO_MANY_CHANGES');
+    }
+    const assemblyEvents = [...events].sort((left, right) =>
+      left.assemblyOrder - right.assemblyOrder || left.displayOrder - right.displayOrder);
+    const assemblySorted = sortedRegistrations(registrations, '招集順', events);
+    affectedGrades.forEach((grade) => {
+      const classSheet = replaceSheetInPlace(book, gradeRosterSheetName('クラス別', grade));
+      writeGradeRosterSheet(
+        classSheet, 'クラス別', grade, versionName, displaySorted, displayEvents, students, createdAt,
+        gradeRosterSheetName('クラス別', grade),
+      );
+      const assemblySheet = replaceSheetInPlace(book, gradeRosterSheetName('招集順', grade));
+      writeGradeRosterSheet(
+        assemblySheet, '招集順', grade, versionName, assemblySorted, assemblyEvents, students, createdAt,
+        gradeRosterSheetName('招集順', grade),
+      );
+      rewritten.push(classSheet, assemblySheet);
+    });
+  }
+
+  // 索引は全学年ぶんを1枚にまとめるため、どこか1件でも変われば作り直す。
+  const indexSheet = replaceSheetInPlace(book, ROSTER_INDEX_SHEET);
+  writeAthleteIndex(indexSheet, versionName, displaySorted, createdAt);
+
+  const rewrittenNames = new Set([...rewritten.map((sheet) => sheet.getName()), ROSTER_INDEX_SHEET]);
+  book.getSheets()
+    .filter((sheet) => !rewrittenNames.has(sheet.getName()) && sheet.getName() !== ROSTER_SYSTEM_SHEET)
+    .forEach((sheet) => restampRosterSheet(sheet, versionName, createdAt));
+
+  highlightCorrectionRegistrations(rewritten, displaySorted, correctionSubmissionIds);
+  writeSystemDataSheet(book, displaySorted, correctionSubmissionIds);
+  book.setActiveSheet(indexSheet);
+  return {
+    file: { name: report, url: book.getUrl() },
+    rewrittenSheetCount: rewritten.length + 1,
+  };
 }
 
 function documentProperties(): GoogleAppsScript.Properties.Properties {
@@ -973,6 +1181,217 @@ export function createPlayerRosters(inputName: string): CreateRosterResult {
   }
 }
 
+/**
+ * 差分作成の1ファイルぶん。複製元が使えないと分かったら`undefined`を返し、
+ * 呼び出し側はそのファイルだけ全面作成へ切り替える。差分で作れないことは失敗ではない。
+ */
+function patchReportFromBaseFolder(
+  report: '種目別' | 'クラス別・招集順' | '当日変更用',
+  state: RosterJobState,
+  versionFolder: GoogleAppsScript.Drive.Folder,
+  registrations: Registration[],
+  events: EventSetting[],
+  students: Student[],
+  correctionSubmissionIds: Set<string>,
+): RosterPatchResult {
+  if (!state.baseFolderId || !state.baseVersionName) return { fallback: 'BASE_FILE_MISSING' };
+  let baseFolder: GoogleAppsScript.Drive.Folder;
+  try {
+    baseFolder = DriveApp.getFolderById(state.baseFolderId);
+  } catch {
+    return { fallback: 'BASE_FILE_MISSING' };
+  }
+  return patchReportFromBase(
+    report, baseFolder, state.baseVersionName, versionFolder, state.versionName,
+    registrations, events, students, state.createdAt, correctionSubmissionIds,
+  );
+}
+
+/** 状況シートへ出す1行。差分で作れたか、作り直したかを担当者が確認できるようにする。 */
+function describeRosterPatch(result: RosterPatchResult | undefined): string {
+  if (!result) return '';
+  if (result.file) return `（${result.rewrittenSheetCount ?? 0}シートだけ書き直しました）`;
+  const reason = {
+    BASE_FILE_MISSING: '前回の版のファイルが見つからなかった',
+    BASE_DATA_MISSING: '前回の版に比較用の情報がなかった',
+    SHEET_LAYOUT_CHANGED: '競技設定が変わってページが対応しなかった',
+    TOO_MANY_CHANGES: '書き直すページが多かった',
+  }[result.fallback ?? 'BASE_FILE_MISSING'];
+  return `（${reason}ため、このファイルは作り直しました）`;
+}
+
+interface RosterDiffPlan {
+  baseInputName: string;
+  baseVersionName: string;
+  baseFolder: GoogleAppsScript.Drive.Folder;
+  registrations: Registration[];
+  acceptedSubmissionIds: string[];
+  diff: RosterDiff;
+  affectedEventNames: string[];
+}
+
+/**
+ * 差分作成の下ごしらえ。前回作り終えた版を`選手名簿作成履歴`の最後の行から選び、
+ * その版の帳票に印字されている内容と、いま承認済みの内容を突き合わせる。
+ */
+function buildRosterDiffPlan(actor: string, createdAt: string, versionName: string): RosterDiffPlan {
+  const history = readRosterHistory();
+  const base = history[history.length - 1];
+  if (!base) {
+    throw new Error('まだ選手名簿を1度も作成していません。最初は「承認済みから選手名簿を作成」で作成してください。');
+  }
+  let baseFolder: GoogleAppsScript.Drive.Folder;
+  try {
+    baseFolder = DriveApp.getFolderById(base.folderId);
+    if (baseFolder.isTrashed()) throw new Error('TRASHED');
+  } catch {
+    throw new Error(`前回の版「${base.versionName}」のフォルダが見つかりません。ゴミ箱へ移動された可能性があります。「承認済みから選手名簿を作成」で作り直してください。`);
+  }
+  const baseBook = findFileInFolder(baseFolder, `${base.versionName}_種目別選手名簿`);
+  if (!baseBook) {
+    throw new Error(`前回の版「${base.versionName}」の種目別選手名簿が見つかりません。「承認済みから選手名簿を作成」で作り直してください。`);
+  }
+  const baseline = readRosterSystemData(SpreadsheetApp.openById(baseBook.getId()));
+  if (!baseline) {
+    throw new Error(`前回の版「${base.versionName}」には差分の比較に使う情報がありません。「承認済みから選手名簿を作成」で作り直してください。`);
+  }
+
+  const submissions = readSubmissions();
+  const acceptedSubmissions = submissions
+    .filter((submission) => submission.status === 'APPROVED' || submission.status === 'APPLIED');
+  if (acceptedSubmissions.length === 0) {
+    throw new Error('承認済みの申請がありません。申請を承認してから選手名簿を作成してください。');
+  }
+  const registrations = buildRegistrationSnapshot({
+    submissions, items: readItems(), students: readStudents(),
+    versionName, updatedAt: createdAt, updatedBy: actor,
+  });
+  const diff = diffRosterRegistrations(baseline, registrations);
+  const formYear = readFormDesign().year;
+  const eventNameById = new Map(readEventSettings()
+    .filter((event) => event.year === formYear)
+    .map((event) => [event.eventId, event.eventName]));
+  return {
+    baseInputName: base.inputName,
+    baseVersionName: base.versionName,
+    baseFolder,
+    registrations,
+    acceptedSubmissionIds: acceptedSubmissions.map((submission) => submission.submissionId),
+    diff,
+    affectedEventNames: diff.affectedEventIds.map((eventId) => eventNameById.get(eventId) ?? eventId),
+  };
+}
+
+/** 差分作成を実行する前の下調べ。作成は行わない。 */
+export function describePlayerRosterDiff(): RosterDiffPreview {
+  assertAuthorized();
+  ensureApplicationSheets();
+  const plan = buildRosterDiffPlan('', new Date().toISOString(), '');
+  const nextVersionName = selectRosterVersionName(
+    plan.baseInputName, childFolderNames(childFolder(parentFolder(), ROSTER_FOLDER_NAME)),
+  );
+  const { diff } = plan;
+  return {
+    canRun: diff.hasChanges,
+    baseVersionName: plan.baseVersionName,
+    nextVersionName,
+    addedCount: diff.addedCount,
+    removedCount: diff.removedCount,
+    changedCount: diff.changedCount,
+    totalCount: diff.totalCount,
+    affectedEventNames: plan.affectedEventNames,
+    message: diff.hasChanges
+      ? `前回の版「${plan.baseVersionName}」から、選手枠${diff.totalCount}件が変わっています（追加${diff.addedCount}件・変更${diff.changedCount}件・取り消し${diff.removedCount}件）。`
+      : `前回の版「${plan.baseVersionName}」から変わった選手枠はありません。新しい版を作る必要はありません。`,
+  };
+}
+
+/**
+ * 前回の版を複製し、変わったところだけ書き直した新しい版を作る。
+ *
+ * 版の名前は前回と同じ名前を引き継ぎ、`_v1.1`、`_v1.2`と自動で番号が進む。
+ * 正式データへの反映（`登録データ`の入れ替え、承認済み申請の反映済み化）は
+ * 「承認済みから選手名簿を作成」とまったく同じ手順で最後にまとめて行う。
+ */
+export function createPlayerRostersFromLatestVersion(): CreateRosterResult {
+  const lock = LockService.getDocumentLock();
+  if (!lock.tryLock(30_000)) {
+    throw new Error('ほかの担当者が処理中です。少し待ってから、もう一度実行してください。');
+  }
+
+  let versionFolder: GoogleAppsScript.Drive.Folder | undefined;
+  let stagingName = '';
+  let sourceName = '';
+  let jobSaved = false;
+  try {
+    ensureApplicationSheets();
+    const activeJob = loadRosterJob();
+    assertRosterJobCanStart(activeJob?.versionName);
+    const actor = assertAuthorized();
+    assertAcceptedSubmissionsAreValid();
+
+    const rosterRoot = childFolder(parentFolder(), ROSTER_FOLDER_NAME);
+    const createdAt = new Date().toISOString();
+    const history = readRosterHistory();
+    const baseInputName = history[history.length - 1]?.inputName ?? '';
+    if (!baseInputName) {
+      throw new Error('まだ選手名簿を1度も作成していません。最初は「承認済みから選手名簿を作成」で作成してください。');
+    }
+    const versionName = selectRosterVersionName(baseInputName, childFolderNames(rosterRoot));
+    const plan = buildRosterDiffPlan(actor, createdAt, versionName);
+    if (!plan.diff.hasChanges) {
+      throw new Error(`前回の版「${plan.baseVersionName}」から変わった選手枠はありません。新しい版を作る必要はありません。`);
+    }
+
+    versionFolder = rosterRoot.createFolder(versionName);
+    const jobId = Utilities.getUuid();
+    const folderUrl = versionFolder.getUrl();
+    stagingName = stagingSheetName('名簿登録作成中', jobId);
+    sourceName = stagingSheetName('名簿申請作成中', jobId);
+    writeStagingRegistrations(stagingName, plan.registrations);
+    writeSourceSubmissionIds(sourceName, plan.acceptedSubmissionIds);
+    const preflight = buildRosterDistributionPreflight(readSubmissions());
+    const state: RosterJobState = {
+      reportPlanVersion: ROSTER_REPORT_PLAN_VERSION,
+      mode: 'DIFF',
+      baseFolderId: plan.baseFolder.getId(),
+      baseVersionName: plan.baseVersionName,
+      jobId, inputName: plan.baseInputName, versionName,
+      folderId: versionFolder.getId(), folderUrl,
+      registrationCount: plan.registrations.length,
+      sourceSubmissionCount: plan.acceptedSubmissionIds.length,
+      createdBy: actor, createdAt, updatedAt: createdAt, nextReportIndex: 0,
+      stagingSheetName: stagingName, sourceSheetName: sourceName, files: [], status: 'RUNNING',
+      message: `「${plan.baseVersionName}」を複製し、変わった${plan.diff.totalCount}件ぶんのページだけを書き直します。クラス配布用PDFは差分にできないため作り直します。${preflight.message}`,
+    };
+    saveRosterJob(state);
+    jobSaved = true;
+    writeRosterStatus(statusFromJob(state));
+    scheduleRosterContinuation();
+
+    return {
+      inputName: plan.baseInputName, versionName,
+      registrationCount: plan.registrations.length,
+      sourceSubmissionCount: plan.acceptedSubmissionIds.length,
+      folderUrl, files: [], processing: true, message: state.message,
+      baseVersionName: plan.baseVersionName, changedCount: plan.diff.totalCount,
+    };
+  } catch (error) {
+    if (jobSaved) {
+      documentProperties().deleteProperty(ROSTER_JOB_PROPERTY);
+      try { clearRosterTriggers(); } catch { /* 元のエラーを優先する */ }
+    }
+    if (stagingName) try { deleteSheetIfPresent(stagingName); } catch { /* 元のエラーを優先する */ }
+    if (sourceName) try { deleteSheetIfPresent(sourceName); } catch { /* 元のエラーを優先する */ }
+    if (versionFolder) {
+      try { versionFolder.setTrashed(true); } catch { /* 元のエラーを優先する */ }
+    }
+    throw error;
+  } finally {
+    lock.releaseLock();
+  }
+}
+
 export function continuePlayerRosterCreation(): void {
   const lock = LockService.getDocumentLock();
   if (!lock.tryLock(30_000)) return;
@@ -1001,14 +1420,19 @@ export function continuePlayerRosterCreation(): void {
           .filter((submission) => submission.submissionType === 'CORRECTION')
           .map((submission) => submission.submissionId),
       );
-      const file = writeReport(
+      const patched = state.mode === 'DIFF' && report !== 'クラス配布用PDF'
+        ? patchReportFromBaseFolder(
+          report, state, folder, registrations, events, students, correctionSubmissionIds,
+        )
+        : undefined;
+      const file = patched?.file ?? writeReport(
         report, folder, state.versionName, registrations, events, students, state.createdAt,
         correctionSubmissionIds,
       );
       state.files = [...state.files.filter((item) => item.name !== report), file];
       state.nextReportIndex += 1;
       state.updatedAt = new Date().toISOString();
-      state.message = `${report}選手名簿が完了しました。次のファイルを自動で作成します。`;
+      state.message = `${report}選手名簿が完了しました${describeRosterPatch(patched)}。次のファイルを自動で作成します。`;
       saveRosterJob(state);
       writeRosterStatus(statusFromJob(state));
       scheduleRosterContinuation();

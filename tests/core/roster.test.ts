@@ -3,11 +3,17 @@ import {
   assertRosterJobCanStart, buildAthleteIndex, buildClassDistributionPages,
   buildConcurrentRosterTables, buildRegistrationSnapshot,
   buildRosterDistributionPreflight,
-  buildEventRosterPages, eventRosterPageTitle,
+  buildEventRosterPages, eventRosterPageTitle, type EventRosterPage,
+  diffRosterRegistrations, gradeRosterSheetName, planEventRosterSheetNames,
+  replaceRosterMetadataVersion, safeRosterSheetName, selectAffectedRosterPages,
+  shouldRebuildWholeReport,
+  type RosterBaselineRow,
   normalizeRosterInputName, planRosterJobStep, ROSTER_REPORT_NAMES, rosterGenderLabel,
   selectRosterVersionName,
 } from '../../src/core/roster';
-import type { EventSetting, Student, Submission, SubmissionItem } from '../../src/shared/types';
+import type {
+  EventSetting, Registration, Student, Submission, SubmissionItem,
+} from '../../src/shared/types';
 
 const student: Student = { studentId: '1101', grade: 1, classNumber: 1, attendanceNumber: 1, name: '架空生徒01' };
 const submission = (id: string, submittedAt: string, status: Submission['status'] = 'APPROVED'): Submission => ({
@@ -315,5 +321,144 @@ describe('eventRosterPageTitle', () => {
   it('長くなりすぎる場合は先頭の競技名と残りの件数にする', () => {
     const events = [1, 2, 3, 4, 5].map((index) => event(`とても長い競技名${index}番`, 300 + index));
     expect(eventRosterPageTitle({ blockKey: 3, events })).toBe('とても長い競技名1番ほか4件');
+  });
+});
+
+describe('diffRosterRegistrations', () => {
+  const baseline = (
+    registrationId: string, overrides: Partial<RosterBaselineRow> = {},
+  ): RosterBaselineRow => ({
+    registrationId, eventId: 'relay', grade: 1, classNumber: 1,
+    studentId: '1101', studentName: '架空生徒01', genderLabel: '男', ...overrides,
+  });
+  const registration = (
+    registrationId: string, overrides: Partial<Registration> = {},
+  ): Registration => ({
+    registrationId, sourceSubmissionId: 'sub-1', eventId: 'relay', eventName: '400mリレー',
+    slotId: 'runner-1', slotName: '第1走者', studentId: '1101', studentNameSnapshot: '架空生徒01',
+    genderSnapshot: 'M', grade: 1, classNumber: 1, version: '確認版_v1.1',
+    updatedAt: '2026-01-01T00:00:00.000Z', updatedBy: 'staff@example.invalid', ...overrides,
+  });
+
+  it('同じ内容なら差分なしになる', () => {
+    const diff = diffRosterRegistrations([baseline('REG-1')], [registration('REG-1')]);
+    expect(diff.hasChanges).toBe(false);
+    expect(diff.totalCount).toBe(0);
+    expect(diff.affectedEventIds).toEqual([]);
+  });
+
+  it('選手が入れ替わった枠を変更として数える', () => {
+    const diff = diffRosterRegistrations(
+      [baseline('REG-1')], [registration('REG-1', { studentId: '1102', studentNameSnapshot: '架空生徒02' })],
+    );
+    expect(diff).toMatchObject({ changedCount: 1, addedCount: 0, removedCount: 0, totalCount: 1 });
+    expect(diff.affectedEventIds).toEqual(['relay']);
+    expect(diff.affectedGrades).toEqual([1]);
+  });
+
+  it('学籍番号が同じでも氏名だけ直った枠を差分に含める', () => {
+    const diff = diffRosterRegistrations(
+      [baseline('REG-1', { studentName: '旧表記' })], [registration('REG-1')],
+    );
+    expect(diff.changedCount).toBe(1);
+  });
+
+  it('性別の表示が変わった枠も差分に含める', () => {
+    const diff = diffRosterRegistrations(
+      [baseline('REG-1', { genderLabel: 'UNKNOWN' })], [registration('REG-1')],
+    );
+    expect(diff.changedCount).toBe(1);
+  });
+
+  it('前回になかった枠は追加、無くなった枠は取り消しとして数える', () => {
+    const diff = diffRosterRegistrations(
+      [baseline('REG-1'), baseline('REG-2', { eventId: 'tug', grade: 2 })],
+      [registration('REG-1'), registration('REG-3', { eventId: 'ball', grade: 3 })],
+    );
+    expect(diff).toMatchObject({ addedCount: 1, removedCount: 1, changedCount: 0, totalCount: 2 });
+    expect(diff.affectedEventIds).toEqual(['ball', 'tug']);
+    expect(diff.affectedGrades).toEqual([2, 3]);
+  });
+});
+
+const rosterPage = (entries: Array<[string, string]>): EventRosterPage => ({
+  blockKey: 0,
+  events: entries.map(([eventId, eventName]) => ({
+    year: 2026, eventId, enabled: true, targetGrade: '全学年', eventName,
+    category: '混合', requiredCount: 2, hasOrder: false, vacancyAllowed: false,
+    assemblyOrder: 1, displayOrder: 1, note: '',
+  })),
+});
+
+describe('selectAffectedRosterPages', () => {
+  const page = (...eventIds: string[]): EventRosterPage =>
+    rosterPage(eventIds.map((eventId) => [eventId, eventId]));
+
+  it('変わった競技を含むページだけを返す', () => {
+    expect(selectAffectedRosterPages([page('a'), page('b', 'c'), page('d')], ['c'])).toEqual([1]);
+  });
+
+  it('変わった競技がなければ何も返さない', () => {
+    expect(selectAffectedRosterPages([page('a'), page('b')], [])).toEqual([]);
+  });
+});
+
+describe('shouldRebuildWholeReport', () => {
+  it('3分の2以上を書き直すなら全面作成にする', () => {
+    expect(shouldRebuildWholeReport(4, 6)).toBe(true);
+    expect(shouldRebuildWholeReport(3, 6)).toBe(false);
+  });
+
+  it('ページが1枚もないときは全面作成にする', () => {
+    expect(shouldRebuildWholeReport(0, 0)).toBe(true);
+  });
+});
+
+describe('planEventRosterSheetNames', () => {
+  const page = (eventId: string, eventName: string): EventRosterPage =>
+    rosterPage([[eventId, eventName]]);
+
+  it('ページの並び順どおりにシート名を決める', () => {
+    expect(planEventRosterSheetNames([page('a', '綱引き'), page('b', '大玉送り')]))
+      .toEqual(['綱引き', '大玉送り']);
+  });
+
+  it('同じ競技名が重なったら競技IDを足して分ける', () => {
+    expect(planEventRosterSheetNames([page('a', '綱引き'), page('b', '綱引き')]))
+      .toEqual(['綱引き', '綱引き_b']);
+  });
+
+  it('索引シートと同じ名前は避ける', () => {
+    expect(planEventRosterSheetNames([page('a', '自分の競技を探す')])).toEqual(['自分の競技を探す_a']);
+  });
+});
+
+describe('safeRosterSheetName', () => {
+  it('シート名に使えない文字を置き換える', () => {
+    expect(safeRosterSheetName('100m/200m')).toBe('100m-200m');
+  });
+
+  it('空文字は既定の名前にする', () => {
+    expect(safeRosterSheetName('   ')).toBe('名称未設定');
+  });
+});
+
+describe('gradeRosterSheetName', () => {
+  it('学年別シートの名前を作る', () => {
+    expect(gradeRosterSheetName('クラス別', 2)).toBe('クラス別 2年');
+    expect(gradeRosterSheetName('招集順', 3)).toBe('招集順 3年');
+  });
+});
+
+describe('replaceRosterMetadataVersion', () => {
+  it('版名と作成日時だけを差し替え、登録件数は残す', () => {
+    expect(replaceRosterMetadataVersion(
+      '版：確認版_v1.0 / 作成：2026/05/01 09:00 / 登録：24件', '確認版_v1.1', '2026/05/02 10:00',
+    )).toBe('版：確認版_v1.1 / 作成：2026/05/02 10:00 / 登録：24件');
+  });
+
+  it('見出しの形が違う行は触らない', () => {
+    expect(replaceRosterMetadataVersion('走順・役割', '確認版_v1.1', '2026/05/02 10:00'))
+      .toBe('走順・役割');
   });
 });

@@ -77,6 +77,7 @@ export type FeatureConditionKey =
   | 'RULE_CHANGE_IDLE'
   | 'ROSTER_JOB_IDLE'
   | 'ROSTER_JOB_ACTIVE'
+  | 'ROSTER_VERSION_EXISTS'
   | 'SUBMISSIONS_EXIST'
   | 'APPROVED_SUBMISSIONS_EXIST'
   | 'MOCK_SUBMISSIONS_EXIST'
@@ -360,6 +361,21 @@ export const FEATURE_CATALOG: readonly FeatureEntry[] = [
     whatChanges: ['「登録データ」の版', '「選手名簿作成履歴」', 'Googleドライブの「選手名簿」フォルダ内の新しい版フォルダ'],
     whatDoesNotChange: ['申請の状態', '過去に作った版のフォルダ', 'Googleフォーム'],
     whenToUse: '承認が一通り終わり、配る名簿を出したいとき。',
+    confirmBeforeRun: true,
+    destructive: false,
+  },
+  {
+    id: 'roster.createDiff',
+    title: '変更点だけを反映して選手名簿を作成',
+    category: 'ROSTER',
+    entrypoint: 'createPlayerRostersFromDiff',
+    placement: [{ kind: 'MENU', path: [] }],
+    visibility: 'ALWAYS',
+    requires: ['APPROVED_SUBMISSIONS_EXIST', 'ROSTER_JOB_IDLE', 'ROSTER_VERSION_EXISTS'],
+    whatItDoes: '前回作った版の帳票を複製し、そこから変わった選手枠のページだけを書き直して新しい版を作ります。名前は前回と同じものを引き継ぎ、版の番号だけが進みます。',
+    whatChanges: ['「登録データ」の版', '「選手名簿作成履歴」', 'Googleドライブの「選手名簿」フォルダ内の新しい版フォルダ'],
+    whatDoesNotChange: ['申請の状態', '過去に作った版のフォルダ', '変わっていない競技・学年のページ', 'Googleフォーム'],
+    whenToUse: '一度名簿を作ったあとに修正申請を何件か承認し、その変更だけを反映した新しい版を早く出したいとき。',
     confirmBeforeRun: true,
     destructive: false,
   },

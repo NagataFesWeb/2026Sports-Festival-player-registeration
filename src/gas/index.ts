@@ -54,10 +54,12 @@ export {
   cancelPlayerRosterCreation,
   continuePlayerRosterCreation,
   createPlayerRosters,
+  createPlayerRostersFromLatestVersion,
+  describePlayerRosterDiff,
   getPlayerRosterJobStatus,
   resumePlayerRosterCreation,
 } from './roster-service';
-export type { CreateRosterResult, RosterJobStatus } from './roster-service';
+export type { CreateRosterResult, RosterDiffPreview, RosterJobStatus } from './roster-service';
 export {
   cleanupLiveFormTest,
   collectLiveFormTestResults,

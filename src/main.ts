@@ -17,6 +17,8 @@ import {
   cancelPlayerRosterCreation as cancelPlayerRosterCreationData,
   continuePlayerRosterCreation as continuePlayerRosterCreationData,
   createPlayerRosters as createPlayerRostersData,
+  createPlayerRostersFromLatestVersion as createPlayerRostersFromLatestVersionData,
+  describePlayerRosterDiff as loadPlayerRosterDiff,
   buildDraftForms as createDraftFormsData,
   buildDraftFormsFromUi as createDraftFormsUiData,
   buildDraftFormsWithFormAppFromUi as createDraftFormsWithFormAppUiData,
@@ -142,6 +144,7 @@ export function onOpen(): void {
   addFeatureItem(managementMenu, 'review.retryImport', context);
   managementMenu.addSeparator();
   addFeatureItem(managementMenu, 'roster.create', context);
+  addFeatureItem(managementMenu, 'roster.createDiff', context);
   addFeatureItem(managementMenu, 'roster.status', context);
   addFeatureItem(managementMenu, 'roster.resume', context);
   addFeatureItem(managementMenu, 'roster.cancel', context);
@@ -950,6 +953,41 @@ export function createPlayerRosters(): void {
   ui.alert(
     '選手名簿の作成を開始しました',
     `版：${result.versionName}\n登録予定：${result.registrationCount}件\n元にした承認済み申請：${result.sourceSubmissionCount}件\n\n${result.message}\n\n保存先：${result.folderUrl}\n\n3種類のスプレッドシートと配布用PDFを1ファイルずつ自動作成します。「名簿作成の状況を確認」で進み具合を確認できます。完了するまで正式データは変更しません。`,
+    ui.ButtonSet.OK,
+  );
+}
+
+export function createPlayerRostersFromDiff(): void {
+  if (!allowFeature('roster.createDiff')) return;
+  const ui = SpreadsheetApp.getUi();
+  const preview = loadPlayerRosterDiff();
+  if (!preview.canRun) {
+    ui.alert('変更点だけを反映して選手名簿を作成', preview.message, ui.ButtonSet.OK);
+    return;
+  }
+  // 競技が多いときはダイアログが読めなくなるため、先頭だけを出して残りは件数にする。
+  const eventNames = preview.affectedEventNames.slice(0, 12);
+  const rest = preview.affectedEventNames.length - eventNames.length;
+  const events = eventNames.length > 0
+    ? `\n\n書き直す競技：${eventNames.join('、')}${rest > 0 ? ` ほか${rest}件` : ''}`
+    : '';
+  const answer = ui.alert(
+    '変更点だけを反映して選手名簿を作成',
+    `${preview.message}${events}\n\n`
+      + `前回の版「${preview.baseVersionName}」のファイルを複製し、変わったページだけを書き直して`
+      + `「${preview.nextVersionName}」を作ります。名前は前回と同じものを引き継ぎます。\n\n`
+      + '前回までの版のフォルダはそのまま残ります。クラス配布用PDFだけは差分にできないため作り直します。\n\n'
+      + '作成しますか？',
+    ui.ButtonSet.YES_NO,
+  );
+  if (answer !== ui.Button.YES) return;
+  const result = createPlayerRostersFromLatestVersionData();
+  ui.alert(
+    '選手名簿の作成を開始しました',
+    `版：${result.versionName}（複製元：${result.baseVersionName}）\n`
+      + `変わった選手枠：${result.changedCount}件\n登録予定：${result.registrationCount}件\n\n`
+      + `${result.message}\n\n保存先：${result.folderUrl}\n\n`
+      + '「名簿作成の状況を確認」で進み具合を確認できます。完了するまで正式データは変更しません。',
     ui.ButtonSet.OK,
   );
 }

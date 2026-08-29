@@ -356,3 +356,162 @@ export function buildRegistrationSnapshot(input: RegistrationSnapshotInput): Reg
 
   return [...registrations.values()];
 }
+
+// ---------------------------------------------------------------- 差分作成
+
+/**
+ * 版フォルダの帳票へ実際に印字されている選手枠。各帳票の`_管理用データ`シートから読む。
+ *
+ * 差分の比較元にこれを使い、`登録データ`シートは使わない。承認取消のあとは
+ * `登録データ`が作り直され、すでに配った帳票の中身とずれるため。
+ */
+export interface RosterBaselineRow {
+  registrationId: string;
+  eventId: string;
+  grade: number;
+  classNumber: number;
+  studentId: string;
+  studentName: string;
+  /** `_管理用データ`は`男`・`女`・`UNKNOWN`の表示名で持つ。比較もこの表記でそろえる。 */
+  genderLabel: string;
+}
+
+export interface RosterDiff {
+  addedCount: number;
+  removedCount: number;
+  changedCount: number;
+  /** 変わった選手枠の合計。0なら前回の版と同じ内容。 */
+  totalCount: number;
+  hasChanges: boolean;
+  /** 書き直しが必要なページを決めるための、変わった枠が属する競技ID。 */
+  affectedEventIds: string[];
+  /** 書き直しが必要なシートを決めるための、変わった枠が属する学年。 */
+  affectedGrades: number[];
+}
+
+/**
+ * 前回の版の帳票の中身と、今回作る登録内容を選手枠単位で突き合わせる。
+ *
+ * `registrationId`（学年・組・競技・枠から作る）で対応付ける。氏名や性別だけが変わった枠も
+ * 差分に含める。生徒マスターの氏名を直したときに、古い氏名が帳票へ残るのを防ぐため。
+ */
+export function diffRosterRegistrations(
+  baseline: RosterBaselineRow[], next: Registration[],
+): RosterDiff {
+  const baseById = new Map(baseline.map((row) => [row.registrationId, row]));
+  const nextById = new Map(next.map((row) => [row.registrationId, row]));
+  const affectedEventIds = new Set<string>();
+  const affectedGrades = new Set<number>();
+  let addedCount = 0;
+  let removedCount = 0;
+  let changedCount = 0;
+
+  const mark = (eventId: string, grade: number): void => {
+    if (eventId) affectedEventIds.add(eventId);
+    if (Number.isFinite(grade)) affectedGrades.add(grade);
+  };
+
+  next.forEach((row) => {
+    const before = baseById.get(row.registrationId);
+    if (!before) {
+      addedCount += 1;
+      mark(row.eventId, row.grade);
+      return;
+    }
+    const sameAthlete = before.studentId === row.studentId
+      && before.studentName === row.studentNameSnapshot
+      && before.genderLabel === rosterGenderLabel(row.genderSnapshot);
+    if (!sameAthlete) {
+      changedCount += 1;
+      mark(row.eventId, row.grade);
+    }
+  });
+
+  baseline.forEach((row) => {
+    if (nextById.has(row.registrationId)) return;
+    removedCount += 1;
+    mark(row.eventId, row.grade);
+  });
+
+  const totalCount = addedCount + removedCount + changedCount;
+  return {
+    addedCount,
+    removedCount,
+    changedCount,
+    totalCount,
+    hasChanges: totalCount > 0,
+    affectedEventIds: [...affectedEventIds].sort(),
+    affectedGrades: [...affectedGrades].sort((left, right) => left - right),
+  };
+}
+
+/** 変わった競技を含むページの位置。ここだけを書き直す。 */
+export function selectAffectedRosterPages(
+  pages: EventRosterPage[], affectedEventIds: Iterable<string>,
+): number[] {
+  const affected = new Set(affectedEventIds);
+  const result: number[] = [];
+  pages.forEach((page, index) => {
+    if (page.events.some((event) => affected.has(event.eventId))) result.push(index);
+  });
+  return result;
+}
+
+/**
+ * 書き直すシートが多いときは、複製して直すより最初から作り直したほうが速く、
+ * 出来上がりも読みやすい。3分の2以上を書き直すなら差分をあきらめる。
+ */
+export function shouldRebuildWholeReport(affectedSheetCount: number, totalSheetCount: number): boolean {
+  if (totalSheetCount <= 0) return true;
+  return affectedSheetCount * 3 >= totalSheetCount * 2;
+}
+
+/** シート名に使えない文字を置き換え、上限内に収める。 */
+export function safeRosterSheetName(value: string): string {
+  const normalized = value.replace(/[\\/?*[\]:]/g, '-').trim() || '名称未設定';
+  return normalized.slice(0, 95);
+}
+
+/**
+ * 種目別・当日変更用のページに割り当てるシート名を、ページの並び順どおりに決める。
+ *
+ * 差分作成では、複製した帳票のどのシートがどのページかをこの名前で突き合わせる。
+ * 作成時と同じ規則で名前を決めないと対応が取れないため、両方がこの関数を使う。
+ */
+export function planEventRosterSheetNames(
+  pages: EventRosterPage[], reservedNames: Iterable<string> = ['自分の競技を探す'],
+): string[] {
+  const taken = new Set(reservedNames);
+  return pages.map((page) => {
+    const base = safeRosterSheetName(eventRosterPageTitle(page));
+    const name = ((): string => {
+      if (!taken.has(base)) return base;
+      const suffix = `_${safeRosterSheetName(page.events[0]?.eventId ?? '')}`;
+      const candidate = `${base.slice(0, Math.max(1, 100 - suffix.length))}${suffix}`;
+      if (!taken.has(candidate)) return candidate;
+      let index = 2;
+      while (taken.has(`${candidate.slice(0, 96)}_${index}`)) index += 1;
+      return `${candidate.slice(0, 96)}_${index}`;
+    })();
+    taken.add(name);
+    return name;
+  });
+}
+
+/** クラス別・招集順の学年別シート名。 */
+export function gradeRosterSheetName(layout: 'クラス別' | '招集順', grade: number): string {
+  return `${layout} ${grade}年`;
+}
+
+/**
+ * 書き直さないシートに残る見出し（`版：… / 作成：… / 登録：…件`）の、版名と作成日時だけを差し替える。
+ * 登録件数は変わっていないシートなので、そのまま残す。
+ */
+export function replaceRosterMetadataVersion(
+  current: string, versionName: string, createdLabel: string,
+): string {
+  if (!current.startsWith('版：')) return current;
+  const head = `版：${versionName} / 作成：${createdLabel}`;
+  const index = current.indexOf(' / 登録：');
+  return index < 0 ? head : `${head}${current.slice(index)}`;
+}
