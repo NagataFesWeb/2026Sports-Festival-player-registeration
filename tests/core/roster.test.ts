@@ -3,7 +3,9 @@ import {
   assertRosterJobCanStart, buildAthleteIndex, buildClassDistributionPages,
   buildConcurrentRosterTables, buildRegistrationSnapshot,
   buildRosterDistributionPreflight,
-  normalizeRosterInputName, planRosterJobStep, ROSTER_REPORT_NAMES, selectRosterVersionName,
+  buildEventRosterPages, eventRosterPageTitle,
+  normalizeRosterInputName, planRosterJobStep, ROSTER_REPORT_NAMES, rosterGenderLabel,
+  selectRosterVersionName,
 } from '../../src/core/roster';
 import type { EventSetting, Student, Submission, SubmissionItem } from '../../src/shared/types';
 
@@ -122,7 +124,7 @@ describe('配布用の自分の競技索引', () => {
       { ...base, registrationId: 'REG-2', eventId: 'dash', eventName: '100m走', slotId: '1', slotName: '第1走者' },
     ]);
     expect(result).toEqual([{
-      grade: 1, classNumber: 1, studentId: '1101', studentName: '架空生徒01',
+      grade: 1, classNumber: 1, studentId: '1101', studentName: '架空生徒01', gender: 'U',
       eventSummary: '100m走（第1走者）\n400mリレー（第2走者）',
     }]);
   });
@@ -182,5 +184,136 @@ describe('学年別の走順・クラス表', () => {
     expect(result[1]?.rows.map((row) => row.slotName)).toEqual(['1人目', '2人目']);
     expect(buildConcurrentRosterTables([], 2, events).map((table) => table.eventName))
       .toEqual(['400mリレー']);
+  });
+});
+
+describe('名簿の性別', () => {
+  const femaleStudent: Student = { ...student, gender: 'F' };
+
+  it('生徒マスターの性別を登録データへ写す', () => {
+    const result = buildRegistrationSnapshot({
+      submissions: [submission('approved', '2026-01-01')], items: [item('approved')],
+      students: [femaleStudent], versionName: '確認版_v1.0',
+      updatedAt: '2026-01-03T00:00:00.000Z', updatedBy: 'staff@example.invalid',
+    });
+    expect(result[0]?.genderSnapshot).toBe('F');
+  });
+
+  it('生徒マスターで性別を確認できない場合はUNKNOWN扱いのUにする', () => {
+    const result = buildRegistrationSnapshot({
+      submissions: [submission('approved', '2026-01-01')], items: [item('approved')],
+      students: [student], versionName: '確認版_v1.0',
+      updatedAt: '2026-01-03T00:00:00.000Z', updatedBy: 'staff@example.invalid',
+    });
+    expect(result[0]?.genderSnapshot).toBe('U');
+  });
+
+  it('索引と走順表へ性別を引き継ぐ', () => {
+    const registrations = buildRegistrationSnapshot({
+      submissions: [submission('approved', '2026-01-01')], items: [item('approved')],
+      students: [femaleStudent], versionName: '確認版_v1.0',
+      updatedAt: '2026-01-03T00:00:00.000Z', updatedBy: 'staff@example.invalid',
+    });
+    expect(buildAthleteIndex(registrations)[0]?.gender).toBe('F');
+    const tables = buildConcurrentRosterTables(registrations, 1);
+    expect(tables[0]?.rows[0]?.athletesByClass[1]?.[0]?.gender).toBe('F');
+  });
+
+  it('印刷用の表記は男・女・UNKNOWNの3種類にそろえる', () => {
+    expect(rosterGenderLabel('M')).toBe('男');
+    expect(rosterGenderLabel('F')).toBe('女');
+    expect(rosterGenderLabel('U')).toBe('UNKNOWN');
+    expect(rosterGenderLabel(undefined)).toBe('UNKNOWN');
+  });
+});
+
+describe('buildEventRosterPages', () => {
+  const event = (
+    eventId: string, eventName: string, displayOrder: number,
+    overrides: Partial<EventSetting> = {},
+  ): EventSetting => ({
+    year: 2026, eventId, enabled: true, targetGrade: '全学年', eventName,
+    category: '混合', requiredCount: 2, hasOrder: false, vacancyAllowed: false,
+    assemblyOrder: displayOrder, displayOrder, note: '', ...overrides,
+  });
+
+  it('表示順0・100・200はそれぞれ別のページになる', () => {
+    const pages = buildEventRosterPages([
+      event('a', '開会式入場', 0),
+      event('b', '綱引き', 100),
+      event('c', '大玉送り', 200),
+    ]);
+    expect(pages.map((page) => page.blockKey)).toEqual([0, 1, 2]);
+    expect(pages.map((page) => page.events.map((item) => item.eventId))).toEqual([['a'], ['b'], ['c']]);
+  });
+
+  it('表示順300・301・302は1つのページにまとまる', () => {
+    const pages = buildEventRosterPages([
+      event('d1', '1年男子100m', 300, { targetGrade: '1年' }),
+      event('d2', '2年男子100m', 301, { targetGrade: '2年' }),
+      event('d3', '3年男子100m', 302, { targetGrade: '3年' }),
+    ]);
+    expect(pages).toHaveLength(1);
+    expect(pages[0]?.blockKey).toBe(3);
+    expect(pages[0]?.events.map((item) => item.eventId)).toEqual(['d1', 'd2', 'd3']);
+  });
+
+  it('100番台の境目でページが変わる', () => {
+    const pages = buildEventRosterPages([
+      event('a', '99番', 99),
+      event('b', '100番', 100),
+      event('c', '199番', 199),
+      event('d', '200番', 200),
+    ]);
+    expect(pages.map((page) => page.events.map((item) => item.eventId)))
+      .toEqual([['a'], ['b', 'c'], ['d']]);
+  });
+
+  it('表示順が前後していても、並べ替えてからページへ分ける', () => {
+    const pages = buildEventRosterPages([
+      event('c', '3番目', 302),
+      event('a', '1番目', 100),
+      event('b', '2番目', 300),
+    ]);
+    expect(pages.map((page) => page.events.map((item) => item.eventId)))
+      .toEqual([['a'], ['b', 'c']]);
+  });
+
+  it('同じ表示順の競技は同じページに残す', () => {
+    const pages = buildEventRosterPages([
+      event('a', '競技A', 300, { assemblyOrder: 2 }),
+      event('b', '競技B', 300, { assemblyOrder: 1 }),
+    ]);
+    expect(pages).toHaveLength(1);
+    // 表示順が同じときは招集順で並べる。
+    expect(pages[0]?.events.map((item) => item.eventId)).toEqual(['b', 'a']);
+  });
+
+  it('競技が無いときは空を返す', () => {
+    expect(buildEventRosterPages([])).toEqual([]);
+  });
+});
+
+describe('eventRosterPageTitle', () => {
+  const event = (eventName: string, displayOrder: number): EventSetting => ({
+    year: 2026, eventId: eventName, enabled: true, targetGrade: '全学年', eventName,
+    category: '混合', requiredCount: 2, hasOrder: false, vacancyAllowed: false,
+    assemblyOrder: displayOrder, displayOrder, note: '',
+  });
+
+  it('1競技だけならその競技名', () => {
+    expect(eventRosterPageTitle({ blockKey: 1, events: [event('綱引き', 100)] })).toBe('綱引き');
+  });
+
+  it('複数競技なら競技名を並べる', () => {
+    expect(eventRosterPageTitle({
+      blockKey: 3,
+      events: [event('1年男子100m', 300), event('2年男子100m', 301)],
+    })).toBe('1年男子100m・2年男子100m');
+  });
+
+  it('長くなりすぎる場合は先頭の競技名と残りの件数にする', () => {
+    const events = [1, 2, 3, 4, 5].map((index) => event(`とても長い競技名${index}番`, 300 + index));
+    expect(eventRosterPageTitle({ blockKey: 3, events })).toBe('とても長い競技名1番ほか4件');
   });
 });

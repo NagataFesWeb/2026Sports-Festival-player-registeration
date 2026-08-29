@@ -66,8 +66,6 @@
     .editor { background: var(--color-primary-soft); border: 2px solid var(--color-primary); border-radius: var(--radius-card); padding: var(--space-4); }
     .editor label { display: block; margin-top: var(--space-3); font-weight: 700; }
     .editor .form-actions { display: grid; grid-template-columns: 1fr 1fr; gap: var(--space-2); margin-top: var(--space-4); }
-    .notice { padding: var(--space-3); border-left: 6px solid var(--color-primary); background: var(--color-primary-soft); }
-    .notice.error { border-color: var(--color-danger); background: var(--color-danger-bg); }
     .global-warning { border-left: 8px solid var(--color-warning); background: var(--color-warning-bg); }
     .student-details { margin-top: var(--space-3); }
     .student-details summary { cursor: pointer; font-weight: 700; color: var(--color-primary-dark); }
@@ -76,6 +74,30 @@
     .student-table th, .student-table td { padding: 7px 8px; border-bottom: 1px solid var(--color-track); text-align: left; vertical-align: top; }
     .student-table th { position: sticky; top: 0; background: var(--color-primary-soft); font-weight: 700; }
     .student-table td:nth-child(1), .student-table td:nth-child(2) { white-space: nowrap; }
+    .overlap { background: var(--color-primary-soft); border-left: 8px solid var(--color-primary); border-radius: var(--radius-card); padding: var(--space-4); margin-top: var(--space-4); }
+    .overlap h2 { margin: 0 0 var(--space-2); }
+    .overlap-group { background: var(--color-field); border: 1px solid var(--color-track); border-radius: var(--radius-control); padding: var(--space-3); margin-top: var(--space-3); }
+    .overlap-group strong, .overlap-group span { display: block; }
+    .overlap-group button { width: 100%; margin-top: var(--space-2); }
+    .slot-section { margin-top: var(--space-4); }
+    .slot-section > summary { cursor: pointer; font-weight: 700; color: var(--color-primary-dark); min-height: 44px; padding: var(--space-2) 0; }
+    .event-group { border: 1px solid var(--color-track); border-radius: var(--radius-card); background: var(--color-field); padding: var(--space-3); margin-top: var(--space-3); }
+    .event-group > h4 { margin: 0 0 var(--space-2); font-size: 1rem; }
+    .slot { border-left: 6px solid var(--color-track); border-radius: var(--radius-control); background: var(--color-paper); padding: var(--space-2) var(--space-3); margin-top: var(--space-2); }
+    .slot strong, .slot span { display: block; }
+    .slot.error { border-left-color: var(--color-danger); background: var(--color-danger-bg); }
+    .slot.warning { border-left-color: var(--color-warning); background: var(--color-warning-bg); }
+    .slot.duplicate:not(.error):not(.warning) { border-left-color: var(--color-primary-dark); }
+    .slot button { width: 100%; margin-top: var(--space-2); }
+    .tags { display: flex; flex-wrap: wrap; gap: var(--space-1); margin-bottom: var(--space-1); }
+    .tag { border-radius: 999px; padding: 2px 9px; font-size: .82rem; font-weight: 700; border: 1px solid transparent; }
+    .tag.error { color: var(--color-danger); background: var(--color-danger-bg); border-color: var(--color-danger); }
+    .tag.warning { color: var(--color-warning); background: var(--color-warning-bg); border-color: var(--color-warning); }
+    .tag.duplicate { color: var(--color-primary-dark); background: var(--color-primary-soft); border-color: var(--color-primary-dark); }
+    .reveal { width: 100%; margin-top: var(--space-3); }
+    .flash { animation: flash 1.8s ease-out; }
+    @keyframes flash { 0%, 100% { box-shadow: none; } 12%, 62% { box-shadow: 0 0 0 4px var(--color-focus); } }
+    @media (prefers-reduced-motion: reduce) { .flash { box-shadow: 0 0 0 4px var(--color-focus); } }
     .empty { border: 1px dashed var(--color-track); padding: var(--space-6); text-align: center; }
     .spinner { width: 28px; height: 28px; margin: var(--space-8) auto; border: 4px solid var(--color-track); border-top-color: var(--color-primary); border-radius: 50%; animation: spin .8s linear infinite; }
     @keyframes spin { to { transform: rotate(360deg); } }
@@ -92,7 +114,112 @@
     PENDING_APPROVAL: '確認待ち', NEEDS_CORRECTION: '修正必要', ON_HOLD: '保留',
     CORRECTION_REQUESTED: '修正依頼済み', REJECTED: '却下', APPROVED: '承認済み', APPLIED: '名簿反映済み'
   };
+  /**
+   * 説明枠。「このボタンで何が起きるか」を操作の手前へ必ず置く。
+   * 見出し・作るもの・変えないものの3点は、設定サイドバーの explanation() と同じ書式にそろえる。
+   */
+  function explanation(title, items, caution) {
+    const box = el('div', 'explanation');
+    box.append(el('strong', '', title));
+    const list = el('ul');
+    items.forEach((item) => list.append(el('li', '', item)));
+    box.append(list);
+    if (caution) box.append(el('p', 'caution', caution));
+    return box;
+  }
+  /** 押せない理由を、ボタンの直下へ文章で添える。色だけに頼らない。 */
+  function blockedReason(button, reason) {
+    if (!reason) return null;
+    button.disabled = true;
+    return el('p', 'blocked-reason', reason);
+  }
+
+  /** フォームは学籍番号だけを受け取るため、生徒マスターから引いた氏名を表示する。 */
+  function displayStudentName(item) {
+    if (item.masterName) return item.masterName;
+    if (item.studentNameInput) return `${item.studentNameInput}（入力値）`;
+    return item.studentIdInput ? '名簿で確認できません' : '未入力';
+  }
+  /** 男女別ルールの判定根拠。名簿で確認できない場合は論理式と同じUNKNOWNを表示する。 */
+  function displayStudentGender(item) {
+    if (item.masterGender === 'M') return '男（M）';
+    if (item.masterGender === 'F') return '女（F）';
+    return 'UNKNOWN';
+  }
+  /** 登録する選手だけを男女別に数える。論理式のM・F・UNKNOWNと同じ数え方にする。 */
+  function genderBreakdown(items) {
+    const registered = items.filter((item) => item.registrationState === 'REGISTER');
+    const male = registered.filter((item) => item.masterGender === 'M').length;
+    const female = registered.filter((item) => item.masterGender === 'F').length;
+    return `男 ${male}人 / 女 ${female}人 / UNKNOWN ${registered.length - male - female}人`;
+  }
   const registrationStateLabels = { REGISTER: '選手を登録する', PENDING: '調整中', NOT_PARTICIPATING: '出場しない' };
+  const emptyReview = { sameEventDuplicates: [], multiEventStudents: [], issueHighlights: [] };
+  const slotElementId = (submissionItemId) => `slot-${submissionItemId}`;
+  const eventElementId = (eventId) => `event-${eventId}`;
+  const issueElementId = (issueId) => `issue-${issueId}`;
+  /**
+   * 検査結果と重複の情報を、選手枠ごと・競技ごとに引ける形へまとめる。
+   * サーバーが付けた通し番号をそのまま使い、カード見出しの`エラー 1`と枠の目印を一致させる。
+   */
+  function buildReviewIndex(review) {
+    const index = { byIssueId: {}, itemTags: {}, eventTags: {}, duplicateByItemId: {} };
+    (review.issueHighlights || []).forEach((highlight) => {
+      index.byIssueId[highlight.issueId] = highlight;
+      const tag = {
+        issueId: highlight.issueId,
+        severity: highlight.severity,
+        label: `${highlight.severity === 'ERROR' ? 'エラー' : '警告'} ${highlight.displayNumber}`
+      };
+      (highlight.submissionItemIds || []).forEach((itemId) => {
+        (index.itemTags[itemId] = index.itemTags[itemId] || []).push(tag);
+      });
+      (highlight.eventIds || []).forEach((eventId) => {
+        (index.eventTags[eventId] = index.eventTags[eventId] || []).push(tag);
+      });
+    });
+    (review.sameEventDuplicates || []).forEach((group) => {
+      (group.slots || []).forEach((slot) => { index.duplicateByItemId[slot.submissionItemId] = group; });
+    });
+    return index;
+  }
+  /** 該当箇所へ画面を移動し、一定時間だけ枠を光らせる。色だけに頼らず目印の文字も併記する。 */
+  function revealTargets(elementIds) {
+    const details = document.getElementById('slot-section');
+    if (details && !details.open) details.open = true;
+    const nodes = elementIds.map((id) => document.getElementById(id)).filter(Boolean);
+    if (!nodes.length) return;
+    nodes[0].scrollIntoView({ behavior: 'smooth', block: 'center' });
+    nodes.forEach((node) => {
+      node.classList.remove('flash');
+      void node.offsetWidth;
+      node.classList.add('flash');
+      setTimeout(() => node.classList.remove('flash'), 2200);
+    });
+  }
+  /** 検査結果1件が指す選手枠・競技の要素IDを返す。特定できない場合は空配列。 */
+  function highlightElementIds(highlight) {
+    if (!highlight) return [];
+    return [
+      ...(highlight.submissionItemIds || []).map(slotElementId),
+      ...(highlight.eventIds || []).map(eventElementId)
+    ];
+  }
+  /** 検査結果カードへ「該当箇所を表示」を付ける。指す枠がない申請全体の内容には付けない。 */
+  function appendRevealButton(card, highlight) {
+    const targets = highlightElementIds(highlight);
+    if (!targets.length) return;
+    const button = el('button', 'reveal', '該当箇所を表示');
+    button.onclick = () => revealTargets(targets);
+    card.append(button);
+  }
+  function tagRow(tags, duplicateGroup) {
+    if (!tags.length && !duplicateGroup) return null;
+    const row = el('div', 'tags');
+    tags.forEach((tag) => row.append(el('span', `tag ${tag.severity.toLowerCase()}`, tag.label)));
+    if (duplicateGroup) row.append(el('span', 'tag duplicate', duplicateGroup.badgeLabel));
+    return row;
+  }
 
   function el(tag, className, text) {
     const node = document.createElement(tag);
@@ -118,7 +245,11 @@
     try { renderDashboard(await run('getDashboardData', filter)); } catch (error) { showFailure(error); }
   }
   function renderDashboard(data) {
-    const header = el('header'); header.append(el('h1', '', '体育祭 選手登録管理'), el('p', 'muted', '件数を押すと、該当する申請だけを表示します。'));
+    const header = el('header');
+    header.append(el('h1', '', '体育祭 選手登録管理'), el('p', 'muted', '件数を押すと、該当する申請だけを表示します。'));
+    const guide = el('button', '', 'この管理表でできることを見る');
+    guide.onclick = () => run('showFeatureGuide').catch(showFailure);
+    header.append(guide);
     if (data.rosterRebuildRequired) {
       header.append(el('div', 'notice error', data.rosterRebuildMessage || '配布用名簿を新しい版で作り直してください。'));
     }
@@ -171,35 +302,63 @@
     const children = [header, counts];
     if (data.clear > 0) {
       const bulk = el('section', 'bulk');
-      bulk.append(
-        el('strong', '', `問題なしの申請が${data.clear}件あります`),
-        el('p', '', '警告0件・エラー0件の申請だけを、処理直前にもう一度検査してまとめて承認します。')
-      );
+      bulk.append(el('strong', '', `問題なしの申請が${data.clear}件あります`));
+      bulk.append(explanation('このボタンで行うこと', [
+        '警告0件・エラー0件の申請だけを、処理の直前にもう一度検査してからまとめて承認します。',
+        '承認した申請は「登録データ」へ反映し、「承認履歴」へ1行ずつ記録します。',
+        '検査で警告またはエラーが見つかった申請は承認しません。',
+      ], '帳票は変わりません。名簿は「承認済みから選手名簿を作成」で別に作ります。'));
       const approveAll = el('button', 'primary', `問題なし ${data.clear}件をまとめて承認する`);
       approveAll.onclick = () => approveAllClear(data.clear); bulk.append(approveAll); children.push(bulk);
     }
     children.push(list);
-    const addMock = el('section', 'cleanup');
-    addMock.append(
-      el('h2', '', '追加の疑似修正申請を試す'),
-      el('p', '', '今ある疑似申請と操作履歴を残したまま、修正フォームが後から届いた想定の申請を追加します。'),
-      el('p', 'muted', '意図的なエラー・警告は付けません。現在の設定上必要な欠員警告などは表示される場合があります。')
-    );
-    const addMockButton = el('button', '', '疑似の修正申請を追加する');
-    addMockButton.onclick = addMockCorrections;
-    addMock.append(addMockButton); children.push(addMock);
-    const cleanup = el('section', 'cleanup');
-    cleanup.append(
-      el('h2', '', '本物のフォームで動作確認する前に'),
-      el('p', '', '自動生成した疑似回答・疑似申請だけを削除し、実際にGoogleフォームから送信した回答を確認できる空の状態へ戻します。'),
-      el('p', 'muted', '照合用の疑似生徒マスター、フォーム、フォーム項目対応表、競技・ルール設定、登録データ、帳票は残します。実在の生徒データは使用しません。')
-    );
-    const prepareFormTest = el('button', 'primary', '疑似申請を削除して本物のフォーム確認へ');
-    prepareFormTest.onclick = prepareRealFormTest;
-    cleanup.append(prepareFormTest);
-    const deleteMock = el('button', 'danger', '開発用の疑似データを完全に削除する');
-    deleteMock.onclick = deleteAllMockData;
-    cleanup.append(deleteMock); children.push(cleanup);
+    // 疑似データの操作は開発用モードのときだけ出す。本番モードではサーバー側でも禁止しており、
+    // 押せてしまう場所を残すと事故のもとになる。
+    const environment = data.environment || { mode: 'DEVELOPMENT', mockSubmissionsExist: true, rosterSourceLabel: '疑似生徒マスター' };
+    if (environment.mode !== 'PRODUCTION') {
+      const noMock = environment.mockSubmissionsExist
+        ? '' : '疑似申請がありません。先にメニューの「開発用の疑似データを作る」を実行してください。';
+
+      const addMock = el('section', 'cleanup');
+      const addMockTitle = el('h2', '', '追加の疑似修正申請を試す');
+      addMockTitle.append(el('span', 'badge-dev', '開発用'));
+      addMock.append(addMockTitle);
+      addMock.append(explanation('このボタンで行うこと', [
+        '今ある疑似申請と操作履歴を残したまま、修正フォームが後から届いた想定の申請を追加します。',
+        `追加する選手は「${environment.rosterSourceLabel}」から選びます。`,
+        '意図的なエラー・警告は付けません。現在の設定上必要な欠員警告などは出る場合があります。',
+      ], '今ある疑似申請・承認履歴・生徒マスター・Googleフォームは変わりません。'));
+      const addMockButton = el('button', '', '疑似の修正申請を追加する');
+      addMockButton.onclick = addMockCorrections;
+      addMock.append(addMockButton);
+      const addMockBlocked = blockedReason(addMockButton, noMock);
+      if (addMockBlocked) addMock.append(addMockBlocked);
+      children.push(addMock);
+
+      const cleanup = el('section', 'cleanup');
+      const cleanupTitle = el('h2', '', '本物のフォームで動作確認する前に');
+      cleanupTitle.append(el('span', 'badge-dev', '開発用'));
+      cleanup.append(cleanupTitle);
+      cleanup.append(explanation('「本物のフォーム確認へ」で行うこと', [
+        '自動生成した疑似回答・疑似申請だけを削除し、実際にGoogleフォームから送った回答を確認できる空の状態へ戻します。',
+        '照合に使う疑似生徒マスターは残します。',
+      ], '競技・ルール設定、フォーム、フォーム項目対応表、登録データ、帳票、本番用の「生徒マスター」は変わりません。'));
+      const prepareFormTest = el('button', 'primary', '疑似申請を削除して本物のフォーム確認へ');
+      prepareFormTest.onclick = prepareRealFormTest;
+      cleanup.append(prepareFormTest);
+      const prepareBlocked = blockedReason(prepareFormTest, noMock);
+      if (prepareBlocked) cleanup.append(prepareBlocked);
+      cleanup.append(explanation('「完全に削除する」で行うこと', [
+        '疑似生徒マスターと、疑似のフォーム回答・承認待ち・申請項目・検査結果・承認履歴・変更履歴をすべて消します。',
+        '疑似申請に使う名簿を切り替える前には、必ずこれを実行してください。',
+      ], '元に戻せません。競技・ルール設定、フォーム、登録データ、帳票、本番用の「生徒マスター」は残ります。'));
+      const deleteMock = el('button', 'danger', '開発用の疑似データを完全に削除する');
+      deleteMock.onclick = deleteAllMockData;
+      cleanup.append(deleteMock);
+      const deleteBlocked = blockedReason(deleteMock, noMock);
+      if (deleteBlocked) cleanup.append(deleteBlocked);
+      children.push(cleanup);
+    }
     app.replaceChildren(...children);
   }
   async function approveAllClear(count) {
@@ -247,13 +406,13 @@
       '本物のGoogleフォームを使う動作確認へ切り替えます。\n\n'
       + '削除するもの：自動生成した疑似フォーム回答・疑似申請と、それに対応する申請項目・検査結果・承認履歴・変更履歴。\n\n'
       + '残すもの：照合用の疑似生徒マスター、通常フォーム、修正フォーム、設定、登録データ、帳票。\n\n'
-      + 'フォームには実在の個人情報を入力せず、疑似生徒マスターの番号と氏名を使ってください。続けますか？'
+      + 'フォームには実在の個人情報を入力せず、疑似生徒マスターの学籍番号を使ってください。続けますか？'
     );
     if (!confirmed) return;
     loading();
     try {
       const result = await run('prepareRealFormTestFromUi');
-      window.alert('自動生成した疑似申請を削除しました。次にGoogleフォームから疑似の番号・氏名で送信してください。');
+      window.alert('自動生成した疑似申請を削除しました。次にGoogleフォームから疑似の学籍番号で送信してください。');
       state.filter = 'ALL';
       renderDashboard(result);
     } catch (error) { showFailure(error); }
@@ -261,6 +420,8 @@
   async function loadDetail(id) { loading(); try { renderDetail(await run('getSubmissionDetail', id)); } catch (error) { showFailure(error); } }
   function renderDetail(detail) {
     state.detail = detail;
+    const review = detail.review || emptyReview;
+    const index = buildReviewIndex(review);
     const back = el('button', '', '申請一覧へ戻る'); back.onclick = () => loadDashboard();
     const header = el('header'); header.append(back, el('h1', '', `${detail.submission.targetGrade}年${detail.submission.targetClass}組 ${labels[detail.submission.submissionType] || ''}`), el('p', 'muted', `送信日時：${formatDate(detail.submission.submittedAt)}`));
     const submitter = el('div', 'submitter');
@@ -300,28 +461,39 @@
     const issueNumber = { WARNING: 0, ERROR: 0 };
     detail.issues.forEach((issue) => {
       issueNumber[issue.severity] += 1;
-      const number = issueNumber[issue.severity];
-      if (issue.issueCode === 'DUPLICATE_STUDENT') {
-        const duplicateLocations = new Set(String(issue.locationText || '').split('、'));
-        const duplicateItems = detail.items.filter((candidate) =>
-          candidate.normalizedStudentId === issue.currentValue
-          && candidate.registrationState !== 'NOT_PARTICIPATING'
-          && duplicateLocations.has(`${candidate.eventName} / ${candidate.slotName}`));
+      const highlight = index.byIssueId[issue.issueId];
+      const number = highlight ? highlight.displayNumber : issueNumber[issue.severity];
+      if (issue.issueCode === 'RULE_EXPRESSION_FALSE') {
+        // ルールは論理式だけで決まるため、判定に使った競技の登録内容をそのまま並べて直せるようにする。
+        const targetEventIds = new Set(highlight ? highlight.eventIds : []);
+        const targetEvents = new Set(String(issue.locationText || '').split('、').map((name) => name.trim()));
+        const targetItems = detail.items.filter((candidate) =>
+          (targetEventIds.size ? targetEventIds.has(candidate.eventId) : targetEvents.has(candidate.eventName))
+          && candidate.registrationState !== 'NOT_PARTICIPATING');
         const card = el('article', `issue ${issue.severity.toLowerCase()}`);
+        card.id = issueElementId(issue.issueId);
         card.append(
           el('h3', '', `${issue.severity === 'ERROR' ? 'エラー' : '警告'} ${number}`),
           el('p', 'message', `問題メッセージ：${issue.displayTitle}`),
-          el('p', '', `重複している登録：${duplicateItems.length}件`)
+          el('p', '', `対象：${issue.locationText || '対象競技'}（${targetItems.length}件の登録）`),
+          el('p', '', `性別の内訳：${genderBreakdown(targetItems)}`)
         );
         const list = el('div', 'candidate-list');
-        duplicateItems.forEach((item) => {
+        targetItems.forEach((item) => {
           const row = el('div', 'candidate-item');
+          const duplicateGroup = index.duplicateByItemId[item.submissionItemId];
+          const tags = tagRow([], duplicateGroup);
+          if (tags) row.append(tags);
           row.append(
             el('strong', '', `${item.eventName} / ${item.slotName}`),
             el('span', '', `学籍番号：${item.studentIdInput || '未入力'}`),
-            el('span', '', `氏名：${item.studentNameInput || '未入力'}`),
+            el('span', '', `名簿の氏名：${displayStudentName(item)}`),
+            el('span', '', `性別：${displayStudentGender(item)}`),
             el('span', 'muted', `登録状態：${registrationStateLabels[item.registrationState] || item.registrationState}`)
           );
+          if (duplicateGroup) {
+            row.append(el('span', 'muted', `${duplicateGroup.badgeLabel}：この競技に同じ生徒が${duplicateGroup.count}回登録されています`));
+          }
           if (!isRejected) {
             const edit = el('button', 'primary', 'この項目を修正');
             edit.onclick = () => showEditor(item);
@@ -330,10 +502,12 @@
           list.append(row);
         });
         card.append(list, el('div', 'instruction', `修正方法：${issue.fixInstruction}`));
+        appendRevealButton(card, highlight);
         issues.append(card); return;
       }
       if (issue.issueCode === 'MULTIPLE_INITIAL_SUBMISSIONS') {
         const card = el('article', 'issue warning');
+        card.id = issueElementId(issue.issueId);
         card.append(
           el('h3', '', `警告 ${number}`),
           el('p', 'message', `問題メッセージ：${issue.displayTitle}`),
@@ -344,16 +518,24 @@
       }
       const submissionLevelIssue = issue.issueCode === 'PROXY_SUBMISSION' || !issue.submissionItemId;
       const item = submissionLevelIssue ? undefined : detail.items.find((candidate) => candidate.submissionItemId === issue.submissionItemId);
+      // 1件で複数の枠を指す検査結果（欠員警告など）は、対応付けた枠名を「場所」に出す。
+      const targetItems = item ? [] : (highlight ? highlight.submissionItemIds : [])
+        .map((itemId) => detail.items.find((candidate) => candidate.submissionItemId === itemId))
+        .filter(Boolean);
+      const targetSlotNames = targetItems.map((candidate) => candidate.slotName).join('、');
+      const targetEventNames = [...new Set(targetItems.map((candidate) => candidate.eventName))].join('、');
       const card = el('article', `issue ${issue.severity.toLowerCase()}`);
+      card.id = issueElementId(issue.issueId);
       card.append(
         el('h3', '', `${issue.severity === 'ERROR' ? 'エラー' : '警告'} ${number}`),
-        el('p', 'location', `競技：${item?.eventName || issue.locationText}`),
-        el('p', 'location', `場所：${item?.slotName || '申請全体'}`),
+        el('p', 'location', `競技：${item?.eventName || targetEventNames || issue.locationText}`),
+        el('p', 'location', `場所：${item?.slotName || targetSlotNames || '申請全体'}`),
         ...(item ? [el('p', '', `登録状態：${registrationStateLabels[item.registrationState] || item.registrationState}`)] : []),
         el('p', '', item
           ? `入力された学籍番号：${item.studentIdInput || '未入力'}`
           : `問題に関する入力内容：${issue.currentValue || '入力なし'}`),
-        ...(item ? [el('p', '', `入力された氏名：${item.studentNameInput || '未入力'}`)] : []),
+        ...(item ? [el('p', '', `名簿の氏名：${displayStudentName(item)}`)] : []),
+        ...(item ? [el('p', '', `性別：${displayStudentGender(item)}`)] : []),
         el('p', 'message', `問題メッセージ：${issue.displayTitle}`),
         el('div', 'instruction', `修正方法：${issue.fixInstruction}`)
       );
@@ -369,10 +551,124 @@
         const open = el('button', 'primary', 'この項目を修正');
         open.onclick = () => openIssue(issue); card.append(open);
       }
+      appendRevealButton(card, highlight);
       issues.append(card);
     });
     const actions = buildActions(detail);
-    app.replaceChildren(header, summary, issues, actions);
+    app.replaceChildren(
+      header, summary, buildOverlapSection(detail, review), issues,
+      buildSlotSection(detail, index, isRejected), actions
+    );
+  }
+  /**
+   * 同じ生徒がどこに何回登録されているかをまとめて見せる。
+   * 良し悪しの判定は`ルール設定`の論理式が行うため、この欄は事実だけを中立に表示する。
+   */
+  function buildOverlapSection(detail, review) {
+    const section = el('section', 'overlap');
+    section.append(el('h2', '', '同じ生徒の重なりを確認する'));
+    const duplicates = review.sameEventDuplicates || [];
+    const multiEvent = review.multiEventStudents || [];
+    if (!duplicates.length) {
+      section.append(el('p', '', '同じ競技の中で同じ生徒が複数の枠に入っている箇所はありません。'));
+    } else {
+      section.append(
+        el('p', 'message', `同じ競技の中で同じ生徒が複数の枠に入っています（${duplicates.length}件）。`),
+        el('p', 'muted', '意図した登録かどうかを確認してください。禁止するルールを設定している場合は、上のエラーまたは警告にも表示されます。')
+      );
+      duplicates.forEach((group) => {
+        const card = el('div', 'overlap-group');
+        const tags = el('div', 'tags');
+        tags.append(el('span', 'tag duplicate', group.badgeLabel));
+        card.append(
+          tags,
+          el('strong', '', `${group.eventName}：同じ生徒が${group.count}回`),
+          el('span', '', `学籍番号：${group.studentId}`),
+          el('span', '', `名簿の氏名：${group.name || '名簿で確認できません'}`),
+          el('span', '', `性別：${genderLabel(group.gender)}`),
+          el('span', '', `登録されている枠：${group.slots.map((slot) => slot.slotName).join('、')}`)
+        );
+        const reveal = el('button', '', '該当箇所を表示');
+        reveal.onclick = () => revealTargets(group.slots.map((slot) => slotElementId(slot.submissionItemId)));
+        card.append(reveal);
+        section.append(card);
+      });
+    }
+    if (multiEvent.length) {
+      const details = el('details', 'student-details');
+      details.append(el('summary', '', `複数の競技に出場する生徒を確認する（${multiEvent.length}人）`));
+      details.append(el('p', 'muted', '競技をまたいだ出場は重複ではありません。出場数を制限する場合は「ルール設定」の論理式で決めます。'));
+      multiEvent.forEach((student) => {
+        const card = el('div', 'overlap-group');
+        card.append(
+          el('strong', '', `${student.studentId}　${student.name || '名簿で確認できません'}（${genderLabel(student.gender)}）`),
+          el('span', '', `出場する競技：${student.eventCount}競技`),
+          el('span', 'muted', student.slots.map((slot) => `${slot.eventName} / ${slot.slotName}`).join('、'))
+        );
+        const reveal = el('button', '', '該当箇所を表示');
+        reveal.onclick = () => revealTargets(student.slots.map((slot) => slotElementId(slot.submissionItemId)));
+        card.append(reveal);
+        details.append(card);
+      });
+      section.append(details);
+    }
+    return section;
+  }
+  function genderLabel(gender) {
+    if (gender === 'M') return '男（M）';
+    if (gender === 'F') return '女（F）';
+    return 'UNKNOWN';
+  }
+  /**
+   * 申請の全選手枠を競技ごとに並べ、エラー・警告・重複のある場所へ目印と色を付ける。
+   * 枠数が多いと縦に長くなるため、既定では折りたたみ、「該当箇所を表示」から自動で開く。
+   */
+  function buildSlotSection(detail, index, isRejected) {
+    const section = el('details', 'slot-section');
+    section.id = 'slot-section';
+    const problemCount = Object.keys(index.itemTags).length;
+    section.open = detail.items.length <= 12;
+    section.append(el('summary', '', `登録内容の一覧を開く（全${detail.items.length}枠${problemCount ? ` / 問題のある枠 ${problemCount}` : ''}）`));
+    section.append(el('p', 'muted', 'エラーは赤、警告は黄色の線と目印を付けています。目印の番号は上のカードの番号と同じです。'));
+    const eventOrder = [];
+    const itemsByEvent = {};
+    detail.items.forEach((item) => {
+      if (!itemsByEvent[item.eventId]) { itemsByEvent[item.eventId] = []; eventOrder.push(item.eventId); }
+      itemsByEvent[item.eventId].push(item);
+    });
+    eventOrder.forEach((eventId) => {
+      const eventItems = itemsByEvent[eventId];
+      const group = el('div', 'event-group');
+      group.id = eventElementId(eventId);
+      const eventTags = tagRow(index.eventTags[eventId] || [], null);
+      if (eventTags) group.append(eventTags);
+      group.append(el('h4', '', eventItems[0].eventName));
+      eventItems.forEach((item) => {
+        const tags = index.itemTags[item.submissionItemId] || [];
+        const duplicateGroup = index.duplicateByItemId[item.submissionItemId];
+        const severity = tags.some((tag) => tag.severity === 'ERROR') ? 'error'
+          : tags.some((tag) => tag.severity === 'WARNING') ? 'warning' : '';
+        const row = el('div', `slot ${severity}${duplicateGroup ? ' duplicate' : ''}`.trim());
+        row.id = slotElementId(item.submissionItemId);
+        const tagLine = tagRow(tags, duplicateGroup);
+        if (tagLine) row.append(tagLine);
+        row.append(
+          el('strong', '', item.slotName),
+          el('span', '', `学籍番号：${item.studentIdInput || '未入力'}`),
+          el('span', '', `名簿の氏名：${displayStudentName(item)}`),
+          el('span', '', `性別：${displayStudentGender(item)}`),
+          el('span', 'muted', `登録状態：${registrationStateLabels[item.registrationState] || item.registrationState}`)
+        );
+        if ((tags.length || duplicateGroup) && !isRejected) {
+          const edit = el('button', 'primary', 'この項目を修正');
+          edit.onclick = () => showEditor(item);
+          row.append(edit);
+        }
+        group.append(row);
+      });
+      section.append(group);
+    });
+    return section;
   }
   function buildDuplicateComparison(detail) {
     const wrap = el('div', 'comparison');
@@ -390,7 +686,8 @@
         row.append(
           el('strong', '', `${item.eventName} / ${item.slotName}`),
           el('span', '', `学籍番号：${item.studentIdInput || '未入力'}`),
-          el('span', '', `氏名：${item.studentNameInput || '未入力'}`),
+          el('span', '', `名簿の氏名：${displayStudentName(item)}`),
+          el('span', '', `性別：${displayStudentGender(item)}`),
           el('span', 'muted', `登録状態：${registrationStateLabels[item.registrationState] || item.registrationState}`)
         );
         list.append(row);
@@ -413,7 +710,11 @@
   function showEditor(item) {
     document.querySelector('.editor')?.remove();
     const editor = el('section', 'editor');
-    editor.append(el('h2', '', 'この項目を修正'), el('p', 'muted', '修正内容と理由を保存すると、変更前後を変更履歴に記録して再検査します。'));
+    editor.append(
+      el('h2', '', 'この項目を修正'),
+      el('p', 'muted', '修正内容と理由を保存すると、変更前後を変更履歴に記録して再検査します。'),
+      el('p', 'muted', `現在の登録：${item.eventName} / ${item.slotName}　${displayStudentName(item)}　性別：${displayStudentGender(item)}`)
+    );
     const idLabel = el('label', '', '選手の学籍番号');
     const idInput = document.createElement('input'); idInput.type = 'text'; idInput.inputMode = 'numeric'; idInput.value = item.studentIdInput;
     idLabel.append(idInput);

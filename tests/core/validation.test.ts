@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import type { Submission, SubmissionItem, ValidationResult } from '../../src/shared/types';
+import type { RuleSetting, Submission, SubmissionItem, ValidationResult } from '../../src/shared/types';
 import { generateMockStudents } from '../../src/core/mockStudents';
 import { normalizeName, normalizeStudentId } from '../../src/core/normalization';
 import { ISSUE_CODES, validateSubmission } from '../../src/core/validation';
@@ -43,6 +43,18 @@ function item(overrides: Partial<SubmissionItem> = {}): SubmissionItem {
   };
 }
 
+const duplicateRule: RuleSetting = {
+  ruleId: 'R-DUP', enabled: true, ruleName: '同じ生徒を重複させない', target: '全競技',
+  targetEventIds: '', condition: '', limit: Number.NaN, judgment: 'エラー',
+  displayMessage: '同じ選手を重複して登録できません', note: '', expression: 'MAX_PER_STUDENT <= 1',
+};
+
+const nameMatchRule: RuleSetting = {
+  ruleId: 'R-NAME', enabled: true, ruleName: '氏名照合', target: '全競技',
+  targetEventIds: '', condition: '', limit: Number.NaN, judgment: '警告',
+  displayMessage: '氏名の表記を確認してください', note: '', expression: 'NAME_MISMATCH == 0',
+};
+
 function validate(
   submissionValue = submission(),
   itemValues = [item()],
@@ -80,21 +92,54 @@ describe('validateSubmission', () => {
     expect(result.normalizedItems[0]?.normalizedStudentId).toBe('1101');
   });
 
-  it('氏名表記差は警告になる', () => {
-    const result = validate(submission(), [item({ studentNameInput: '架空生徒-別表記' })]);
-    expect(result.issues.map((issue) => issue.issueCode)).toContain(ISSUE_CODES.STUDENT_NAME_MISMATCH);
+  it('氏名照合の論理式で表記差を警告にできる', () => {
+    const result = validateSubmission(
+      submission(), [item({ studentNameInput: '架空生徒-別表記' })],
+      { students, sameClassInitialSubmissionCount: 1, rules: [nameMatchRule] },
+    );
+    const issue = result.issues.find((candidate) => candidate.issueCode === ISSUE_CODES.RULE_EXPRESSION_FALSE);
+    expect(issue?.displayTitle).toBe('氏名の表記を確認してください');
     expect(result.nextStatus).toBe('PENDING_APPROVAL');
+  });
+
+  it('氏名入力のない回答は氏名照合の警告を出さない', () => {
+    const result = validateSubmission(
+      submission(), [item({ studentNameInput: '' })],
+      { students, sameClassInitialSubmissionCount: 1, rules: [nameMatchRule] },
+    );
+    expect(result.warningCount).toBe(0);
+    expect(result.errorCount).toBe(0);
+    expect(result.nextStatus).toBe('PENDING_APPROVAL');
+  });
+
+  it('氏名照合の論理式がなければ表記差を検出しない', () => {
+    const result = validate(submission(), [item({ studentNameInput: '架空生徒-別表記' })]);
+    expect(result.issues).toEqual([]);
+  });
+
+  it('氏名入力のない回答でも学籍番号の誤りは検出する', () => {
+    const notFound = validate(submission(), [item({ studentIdInput: '1199', studentNameInput: '' })]);
+    expect(notFound.issues.map((issue) => issue.issueCode)).toContain(ISSUE_CODES.STUDENT_NOT_FOUND);
+    const otherClass = validate(submission(), [item({ studentIdInput: '1201', studentNameInput: '' })]);
+    expect(otherClass.issues.map((issue) => issue.issueCode)).toContain(ISSUE_CODES.STUDENT_CLASS_MISMATCH);
   });
 
   it.each([
     ['', ISSUE_CODES.STUDENT_ID_MISSING],
     ['123', ISSUE_CODES.STUDENT_ID_INVALID],
     ['1999', ISSUE_CODES.STUDENT_ID_INVALID],
-    ['1199', ISSUE_CODES.STUDENT_NOT_FOUND],
   ])('学籍番号 %j をエラーにする', (studentIdInput, expectedCode) => {
     const result = validate(submission(), [item({ studentIdInput })]);
     expect(result.issues.map((issue) => issue.issueCode)).toContain(expectedCode);
     expect(result.nextStatus).toBe('NEEDS_CORRECTION');
+  });
+
+  it('生徒マスターにない学籍番号は警告にとどめ、承認できる状態にする', () => {
+    const result = validate(submission(), [item({ studentIdInput: '1199', studentNameInput: '' })]);
+    const notFound = result.issues.find((issue) => issue.issueCode === ISSUE_CODES.STUDENT_NOT_FOUND);
+    expect(notFound?.severity).toBe('WARNING');
+    expect(result.errorCount).toBe(0);
+    expect(result.nextStatus).toBe('PENDING_APPROVAL');
   });
 
   it('別クラスの学籍番号はエラーになる', () => {
@@ -119,34 +164,57 @@ describe('validateSubmission', () => {
     expect(result.issues.map((issue) => issue.issueCode)).toEqual([ISSUE_CODES.REGISTRATION_PENDING]);
   });
 
-  it('同一生徒の重複登録は登録場所をまとめた1件のエラーにする', () => {
-    const result = validate(submission(), [
+  it('重複禁止の論理式で同一生徒の重複をエラーにする', () => {
+    const result = validateSubmission(submission(), [
       item(),
       item({ submissionItemId: 'item-002', slotId: 'slot-002', slotName: '第2走者' }),
       item({ submissionItemId: 'item-003', slotId: 'slot-003', slotName: '第3走者' }),
-    ]);
-    const duplicateIssues = result.issues.filter((issue) => issue.issueCode === ISSUE_CODES.DUPLICATE_STUDENT);
-    expect(duplicateIssues).toHaveLength(1);
-    expect(duplicateIssues[0]?.displayTitle).toContain('3件の登録で重複');
-    expect(duplicateIssues[0]?.locationText).toContain('第1走者');
-    expect(duplicateIssues[0]?.locationText).toContain('第3走者');
-    expect(duplicateIssues[0]?.fixInstruction).toContain('上限の1件');
+    ], { students, sameClassInitialSubmissionCount: 1, rules: [duplicateRule] });
+    const issue = result.issues.find((candidate) => candidate.issueCode === ISSUE_CODES.RULE_EXPRESSION_FALSE);
+    expect(issue?.displayTitle).toBe('同じ選手を重複して登録できません');
+    expect(issue?.severity).toBe('ERROR');
+    expect(issue?.currentValue).toContain('MAX_PER_STUDENT=3');
+    expect(result.nextStatus).toBe('NEEDS_CORRECTION');
   });
 
-  it('同一競技内の重複ルールでは別競技への出場を重複扱いしない', () => {
+  it('MAX_PER_EVENTは同じ競技内の重複だけを数える', () => {
+    const perEventRule: RuleSetting = {
+      ...duplicateRule, ruleId: 'R-EVENT', ruleName: '同じ競技へ同じ生徒を2回入れない',
+      displayMessage: '同じ競技に同じ選手が重複して登録されています', expression: 'MAX_PER_EVENT <= 1',
+    };
+    const sameEvent = validateSubmission(submission(), [
+      item(),
+      item({ submissionItemId: 'item-002', slotId: 'slot-002', slotName: '第2走者' }),
+    ], { students, sameClassInitialSubmissionCount: 1, rules: [perEventRule] });
+    const issue = sameEvent.issues.find((candidate) => candidate.issueCode === ISSUE_CODES.RULE_EXPRESSION_FALSE);
+    expect(issue?.displayTitle).toBe('同じ競技に同じ選手が重複して登録されています');
+    expect(issue?.currentValue).toContain('MAX_PER_EVENT=2');
+
+    const differentEvents = validateSubmission(submission(), [
+      item(),
+      item({ submissionItemId: 'item-002', eventId: 'event-002', eventName: '別の架空競技' }),
+    ], { students, sameClassInitialSubmissionCount: 1, rules: [perEventRule] });
+    expect(differentEvents.issues).toEqual([]);
+  });
+
+  it('重複禁止の論理式がなければ重複を検出しない', () => {
+    const result = validate(submission(), [
+      item(),
+      item({ submissionItemId: 'item-002', slotId: 'slot-002', slotName: '第2走者' }),
+    ]);
+    expect(result.issues).toEqual([]);
+  });
+
+  it('指定競技の重複ルールは対象外の競技を重複扱いしない', () => {
     const result = validateSubmission(submission(), [
       item(),
       item({ submissionItemId: 'item-002', eventId: 'event-002', eventName: '別の架空競技' }),
     ], {
       students,
       sameClassInitialSubmissionCount: 1,
-      rules: [{
-        ruleId: 'R003', enabled: true, ruleName: '同一競技内の重複登録は禁止',
-        target: '全競技', targetEventIds: '', condition: '同一生徒の重複', limit: 1,
-        judgment: 'エラー', displayMessage: '同じ選手が重複しています', note: '',
-      }],
+      rules: [{ ...duplicateRule, target: '指定競技', targetEventIds: 'event-001' }],
     });
-    expect(result.issues.map((issue) => issue.issueCode)).not.toContain(ISSUE_CODES.DUPLICATE_STUDENT);
+    expect(result.issues).toEqual([]);
   });
 
   it('性別人数の論理式がTRUEなら問題なし、FALSEなら指定したエラーにする', () => {

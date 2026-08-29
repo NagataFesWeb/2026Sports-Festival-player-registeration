@@ -1,7 +1,8 @@
 import { build } from 'esbuild';
-import { copyFile, mkdir, readFile, writeFile } from 'node:fs/promises';
+import { copyFile, mkdir, readdir, readFile, writeFile } from 'node:fs/promises';
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { extractEntrypoints } from './extract-entrypoints.mjs';
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const dist = resolve(root, 'dist');
@@ -18,14 +19,15 @@ await build({
 });
 
 const mainSource = await readFile(resolve(root, 'src/main.ts'), 'utf8');
-const globals = [...mainSource.matchAll(/export function\s+([A-Za-z_$][\w$]*)\s*\(/g)]
-  .map((match) => match[1]);
+const globals = extractEntrypoints(mainSource);
 if (globals.length === 0) throw new Error('Apps Scriptへ公開する関数がsrc/main.tsに見つかりません。');
 await writeFile(
   resolve(dist, 'Entrypoints.js'),
   globals.map((name) => `function ${name}(...args) { return SportsFestivalApp.${name}(...args); }`).join('\n') + '\n'
 );
-await copyFile(resolve(root, 'src/Sidebar.html'), resolve(dist, 'Sidebar.html'));
-await copyFile(resolve(root, 'src/SettingsSidebar.html'), resolve(dist, 'SettingsSidebar.html'));
-await copyFile(resolve(root, 'src/UiTokens.html'), resolve(dist, 'UiTokens.html'));
+// src/直下のHTMLはすべてコピーする。新しい画面を足したときのコピー漏れを避けるため、
+// ファイル名を1件ずつ書かない。
+for (const file of (await readdir(resolve(root, 'src'))).filter((name) => name.endsWith('.html'))) {
+  await copyFile(resolve(root, 'src', file), resolve(dist, file));
+}
 await copyFile(resolve(root, 'src/appsscript.json'), resolve(dist, 'appsscript.json'));

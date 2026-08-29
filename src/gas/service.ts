@@ -4,10 +4,18 @@ import { buildParticipationWarnings } from '../core/participation';
 import { clearApprovalCandidates, countReviewQueue } from '../core/dashboard';
 import { toClientSafe } from '../core/client-transfer';
 import { affectedSubmissionIds, duplicateCandidates } from '../core/duplicate-selection';
+import { reviewSubmission } from '../core/submission-review';
 import { isDevelopmentMockSubmissionId } from '../core/mock-data-lifecycle';
+import {
+  MOCK_ROSTER_SOURCE_LABELS,
+  emptyRosterMessage,
+  type MockRosterSource,
+} from '../core/mock-roster-source';
+import { getSystemMode, isPracticeWorkbook } from './mode-probe';
 import { generateMockSubmissions } from './mock-data';
 import { initializeSettings } from './settings-service';
 import { readEventSettings, readFormDesign, readFormRegistry, readRuleSettings } from './settings-repository';
+import { normalizeStudentId } from '../core/normalization';
 import { ISSUE_CODES, validateSubmission } from '../core/validation';
 import {
   assertActionAllowed,
@@ -22,6 +30,7 @@ import type {
   SubmissionItem,
   SubmissionStatus,
   SubmissionSummary,
+  Student,
   ValidationResult
 } from '../shared/types';
 import { ITEM_HEADERS, SCRIPT_PROPERTIES, SHEETS, SUBMISSION_HEADERS } from '../shared/constants';
@@ -36,12 +45,15 @@ import {
   findSubmission,
   findRawFormResponseBySubmissionId,
   findItem,
-  isProductionStudentMasterActive,
+  assertMockRosterSourceConsistent,
+  readMockRosterSourceSetting,
+  writeMockRosterSourceStamp,
   readIssues,
   readApprovalHistory,
   readItems,
   readMockDataSettings,
   readMockStudents,
+  readProductionStudents,
   nextDevelopmentMockResponseSequence,
   readRawFormResponses,
   readRegistrations,
@@ -64,6 +76,18 @@ import {
 
 export type { SubmissionAction } from '../core/workflow';
 
+/**
+ * 画面が「この操作を出すか・押せるか」を決めるための情報。
+ * 重い判定はここへ入れない。`buildDashboardData`は再検査のたびに通る道なので、
+ * 追加の読み取りが要らないものと、シート1〜2枚で済むものだけにする。
+ */
+export interface DashboardEnvironment {
+  mode: 'DEVELOPMENT' | 'PRODUCTION';
+  practiceWorkbook: boolean;
+  mockSubmissionsExist: boolean;
+  rosterSourceLabel: string;
+}
+
 export interface DashboardData {
   warning: number;
   error: number;
@@ -76,6 +100,7 @@ export interface DashboardData {
   rosterRebuildMessage: string;
   submissions: SubmissionSummary[];
   globalWarnings: GlobalWarning[];
+  environment: DashboardEnvironment;
 }
 
 export interface ActionResult {
@@ -128,13 +153,27 @@ const DASHBOARD_COLORS = {
 const TRANSPARENT_PIXEL_PNG =
   'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNgYAAAAAMAASsJTYQAAAAASUVORK5CYII=';
 
+/**
+ * 疑似申請に使う名簿を決め、その名簿の生徒を返す。
+ * 空のときは、どちらの名簿が空なのかが分かる文言で止める。
+ */
+function resolveMockRoster(): { source: MockRosterSource; students: Student[] } {
+  const source = readMockRosterSourceSetting();
+  const students = source === 'PRODUCTION_STUDENTS' ? readProductionStudents() : readMockStudents();
+  if (students.length === 0) throw new Error(emptyRosterMessage(source));
+  return { source, students };
+}
+
 export function initializeDevelopmentWorkbookData(): DashboardData {
   assertAuthorized();
   assertDevelopmentMode();
   ensureApplicationSheets();
   initializeSettings();
-  const mockStudents = generateMockStudents();
-  const mockConfig = readMockDataSettings(mockStudents);
+  const source = readMockRosterSourceSetting();
+  // 生徒マスターを選んだときは疑似生徒マスターを一切作らない（実在名簿だけで試す）。
+  const students = source === 'PRODUCTION_STUDENTS' ? readProductionStudents() : generateMockStudents();
+  if (students.length === 0) throw new Error(emptyRosterMessage(source));
+  const mockConfig = readMockDataSettings(students);
   const design = readFormDesign();
   const generated = generateMockSubmissions({
     year: design.year,
@@ -144,13 +183,14 @@ export function initializeDevelopmentWorkbookData(): DashboardData {
     correctionRegistry: readFormRegistry(design.correctionFormId),
     events: readEventSettings().filter((event) => event.enabled && event.year === design.year),
     rules: readRuleSettings().filter((rule) => rule.enabled),
-    students: mockStudents,
+    students,
   }, mockConfig);
   if (!Array.isArray(generated.submissions) || !Array.isArray(generated.items)
     || !Array.isArray(generated.rawResponses)) {
     throw new Error('疑似申請データを作成できませんでした。開発用データの設定を確認してください。');
   }
-  replaceStudents(mockStudents);
+  if (source === 'MOCK_STUDENTS') replaceStudents(students);
+  writeMockRosterSourceStamp(source);
   replaceSubmissions(generated.submissions);
   replaceItems(generated.items);
   replaceRawFormResponses(generated.rawResponses);
@@ -165,7 +205,10 @@ export function prepareMockDataSettings(): ReturnType<typeof readMockDataSetting
   assertAuthorized();
   assertDevelopmentMode();
   ensureApplicationSheets();
-  const students = generateMockStudents();
+  // 名簿行そのものを読むので、`ensureMockDataSettings`より前に選択を確かめる。
+  const source = readMockRosterSourceSetting();
+  const students = source === 'PRODUCTION_STUDENTS' ? readProductionStudents() : generateMockStudents();
+  if (students.length === 0) throw new Error(emptyRosterMessage(source));
   ensureMockDataSettings(students);
   return readMockDataSettings(students);
 }
@@ -191,13 +234,8 @@ export function addDevelopmentMockCorrectionSubmissions(count: number): Addition
     if (!beforeSubmissions.some((submission) => isDevelopmentMockSubmissionId(submission.submissionId))) {
       throw new Error('追加先となる疑似申請がありません。先に「開発用の疑似データを作る」を実行してください。');
     }
-    if (isProductionStudentMasterActive()) {
-      throw new Error('本番用の「生徒マスター」が有効なため、疑似修正申請は追加できません。本番用シートのA列・B列を空にして疑似マスターへ切り替えてください。');
-    }
-    const students = readMockStudents();
-    if (students.length === 0) {
-      throw new Error('「疑似生徒マスター」が空です。先に開発用の疑似データを作ってください。');
-    }
+    assertMockRosterSourceConsistent(beforeSubmissions);
+    const { students } = resolveMockRoster();
     const settings = readMockDataSettings(students);
     const design = readFormDesign();
     const generated = generateMockSubmissions({
@@ -272,8 +310,9 @@ export function prepareRealFormTestData(): DashboardData {
 
 export function revalidateAllSubmissions(): DashboardData {
   assertAuthorized();
-  const students = readStudents();
   const submissions = readSubmissions();
+  assertMockRosterSourceConsistent(submissions);
+  const students = readStudents();
   const allItems = readItems();
   const rules = readRuleSettings();
   const normalizedItems: SubmissionItem[] = [];
@@ -305,6 +344,7 @@ export function revalidateAllSubmissions(): DashboardData {
 export function revalidateAffectedSubmissions(submissionIds: string[]): DashboardData {
   assertAuthorized();
   const submissions = readSubmissions();
+  assertMockRosterSourceConsistent(submissions);
   const requested = new Set(affectedSubmissionIds(submissions, submissionIds));
 
   if (requested.size === 0) {
@@ -379,6 +419,7 @@ function buildDashboardData(submissions: Submission[], filter: DashboardFilter):
   const globalWarnings = participationWarnings();
   const rosterRebuildMessage = PropertiesService.getDocumentProperties()
     .getProperty(SCRIPT_PROPERTIES.rosterRebuildRequired) ?? '';
+  const mode = getSystemMode();
   return {
     ...counts,
     warning: counts.warning + globalWarnings.length,
@@ -386,6 +427,16 @@ function buildDashboardData(submissions: Submission[], filter: DashboardFilter):
     globalWarnings: filter === 'ALL' || filter === 'WARNING' ? globalWarnings : [],
     rosterRebuildRequired: rosterRebuildMessage !== '',
     rosterRebuildMessage,
+    environment: {
+      mode,
+      practiceWorkbook: isPracticeWorkbook(),
+      // 引数の配列から数えるので、追加の読み取りは発生しない。
+      mockSubmissionsExist: submissions.some((submission) =>
+        isDevelopmentMockSubmissionId(submission.submissionId)),
+      rosterSourceLabel: mode === 'PRODUCTION'
+        ? MOCK_ROSTER_SOURCE_LABELS.PRODUCTION_STUDENTS
+        : MOCK_ROSTER_SOURCE_LABELS[readMockRosterSourceSetting()],
+    },
   };
 }
 
@@ -443,18 +494,30 @@ export function getSubmissionDetail(submissionId: string): SubmissionDetail {
     }
   }
   const allItems = readItems();
+  // フォームは学籍番号だけを受け取るので、確認画面へは名簿から引いた氏名と性別を添える。
+  // 性別は男女別ルールの判定根拠になるため、名簿に無い学籍番号は論理式の`UNKNOWN`と
+  // 同じ扱いで`U`を返す。
+  const studentById = new Map(readStudents().map((student) => [student.studentId, student]));
+  const withMasterName = (item: SubmissionItem): SubmissionItem => {
+    const student = studentById.get(normalizeStudentId(item.studentIdInput));
+    return { ...item, masterName: student?.name ?? '', masterGender: student?.gender ?? 'U' };
+  };
+  const detailItems = allItems.filter((item) => item.submissionId === submissionId)
+    .map(withMasterName);
+  const detailIssues = readIssues().filter((issue) => issue.submissionId === submissionId);
   return toClientSafe({
     submission,
-    items: allItems.filter((item) => item.submissionId === submissionId),
-    issues: readIssues().filter((issue) => issue.submissionId === submissionId),
+    items: detailItems,
+    issues: detailIssues,
     approvalHistory: readApprovalHistory(submissionId).map((record) => ({
       action: record.action, actorEmail: record.actorEmail, reason: record.reason, actedAt: record.actedAt,
     })),
     responseNote,
     duplicateCandidates: duplicateCandidates(readSubmissions(), submission).map((candidate) => ({
       submission: candidate,
-      items: allItems.filter((item) => item.submissionId === candidate.submissionId),
+      items: allItems.filter((item) => item.submissionId === candidate.submissionId).map(withMasterName),
     })),
+    review: reviewSubmission(detailItems, detailIssues),
   });
 }
 
@@ -515,6 +578,7 @@ export function approveAllClearSubmissions(): BulkApprovalResult {
   try {
     const actorEmail = assertAuthorized();
     const submissions = readSubmissions();
+    assertMockRosterSourceConsistent(submissions);
     const allItems = readItems();
     const students = readStudents();
     const rules = readRuleSettings();
@@ -586,7 +650,7 @@ export function openIssueLocation(
   book.setActiveRange(range);
   book.toast(
     itemTarget
-      ? '青く選択された学籍番号・氏名を確認してください。直した後は「すべて再検査する」を実行します。'
+      ? '青く選択された学籍番号を確認してください。直した後は「すべて再検査する」を実行します。'
       : '青く選択された申請全体の情報を確認してください。',
     '修正箇所を開きました',
     8
@@ -622,6 +686,10 @@ export function editSubmissionItem(
     }
     const normalizedStudentIdInput = studentIdInput.trim();
     const after = updateItemInput(submissionItemId, normalizedStudentIdInput, registrationState);
+    // 学籍番号だけの入力なので、変更履歴へは名簿から引いた氏名を残す。
+    const historyNameById = new Map(readStudents().map((student) => [student.studentId, student.name]));
+    const historyName = (item: SubmissionItem): string =>
+      historyNameById.get(normalizeStudentId(item.studentIdInput)) ?? item.studentNameInput;
     try {
       appendChangeHistory({
         changeId: Utilities.getUuid(),
@@ -629,8 +697,8 @@ export function editSubmissionItem(
         submissionItemId,
         beforeStudentId: before.studentIdInput,
         afterStudentId: after.studentIdInput,
-        beforeStudentName: before.studentNameInput,
-        afterStudentName: after.studentNameInput,
+        beforeStudentName: historyName(before),
+        afterStudentName: historyName(after),
         beforeRegistrationState: before.registrationState,
         afterRegistrationState: after.registrationState,
         reason: reason.trim(),
@@ -681,6 +749,7 @@ export function performSubmissionAction(
     const actorEmail = assertAuthorized();
     const submission = findSubmission(submissionId);
     if (!submission) throw new Error('指定された申請が見つかりません。一覧を開き直してください。');
+    assertMockRosterSourceConsistent([submission]);
     previous = submission;
     previousItems = readItems().filter((item) => item.submissionId === submissionId);
     previousIssues = readIssues().filter((issue) => issue.submissionId === submissionId);

@@ -28,6 +28,7 @@ const CLEARED_SHEETS = [
   SHEETS.settingsIssues,
   SHEETS.formRegistry,
   SHEETS.rawFormResponses,
+  SHEETS.liveFormTest,
 ] as const;
 
 const FORM_REFERENCE_KEYS = new Set([

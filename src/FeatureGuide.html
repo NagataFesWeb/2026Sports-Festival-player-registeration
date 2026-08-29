@@ -1,0 +1,162 @@
+<!doctype html>
+<html lang="ja">
+<head>
+  <base target="_top">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <?!= uiTokens ?>
+  <style>
+    /*
+     * 機能紹介ダイアログ。一覧の中身は src/core/feature-catalog.ts が正で、ここには書かない。
+     * ここに説明文を書き写すと、機能を直したときに片方だけ古くなる。
+     */
+    * { box-sizing: border-box; }
+    body { margin: 0; background: var(--color-paper); color: var(--color-ink); font: 15px/1.65 var(--font-ui); }
+    .shell { max-width: 1120px; margin: 0 auto; padding: var(--space-4) var(--space-4) var(--space-8); }
+    header { border-bottom: 4px solid var(--color-primary); padding-bottom: var(--space-3); margin-bottom: var(--space-4); }
+    h1 { margin: 0 0 var(--space-2); font-size: 1.3rem; }
+    h2 { margin: 0 0 var(--space-1); font-size: 1.05rem; }
+    h3 { margin: 0; font-size: 1rem; }
+    p { margin: var(--space-2) 0; }
+    .muted { color: var(--color-muted); font-size: .9rem; }
+    .status { display: flex; flex-wrap: wrap; gap: var(--space-2); align-items: center; }
+    .pill { padding: 2px 10px; border-radius: 999px; background: var(--color-primary-soft); color: var(--color-primary-dark); font-size: .82rem; font-weight: 700; }
+    .toc { display: flex; flex-wrap: wrap; gap: var(--space-2); margin: var(--space-3) 0 var(--space-6); }
+    .toc a { padding: var(--space-1) var(--space-3); border: 1px solid var(--color-track); border-radius: 999px; background: var(--color-field); color: var(--color-ink); text-decoration: none; font-size: .88rem; font-weight: 700; }
+    .toc a:hover { border-color: var(--color-primary); }
+    .toc a:focus-visible { outline: 3px solid var(--color-focus); outline-offset: 2px; }
+    section.category { margin-bottom: var(--space-8); scroll-margin-top: var(--space-4); }
+    .category-head { margin-bottom: var(--space-3); }
+    .cards { display: grid; gap: var(--space-3); }
+    .feature-card { background: var(--color-field); border: 1px solid var(--color-track); border-left: 7px solid var(--color-primary); border-radius: var(--radius-card); padding: var(--space-4); }
+    /* 使えない機能は消さずに残し、押せない理由を必ず添える。 */
+    .feature-card.blocked { border-left-color: var(--color-warning); background: #FCFDFB; }
+    .feature-card.destructive { border-left-color: var(--color-danger); }
+    .card-head { display: flex; flex-wrap: wrap; gap: var(--space-2); align-items: baseline; justify-content: space-between; }
+    .state { font-size: .85rem; font-weight: 700; white-space: nowrap; }
+    .state.usable { color: var(--color-primary-dark); }
+    .state.blocked { color: var(--color-warning); }
+    .purpose { margin: var(--space-2) 0 var(--space-3); }
+    .facts { display: grid; gap: var(--space-3); margin-top: var(--space-3); }
+    .fact strong { display: block; font-size: .88rem; color: var(--color-muted); }
+    .fact ul { margin: var(--space-1) 0 0; padding-left: 1.3em; }
+    .fact li + li { margin-top: 2px; }
+    .location { margin-top: var(--space-3); padding-top: var(--space-2); border-top: 1px dashed var(--color-track); font-size: .88rem; color: var(--color-muted); }
+    .flags { margin-top: var(--space-2); font-size: .85rem; color: var(--color-muted); }
+    @media (min-width: 720px) {
+      .cards { grid-template-columns: 1fr 1fr; }
+      .facts { grid-template-columns: 1fr 1fr; }
+    }
+  </style>
+</head>
+<body><main id="app" class="shell" aria-live="polite"></main>
+<script>
+  const app = document.getElementById('app');
+  function el(tag, className, text) {
+    const node = document.createElement(tag);
+    if (className) node.className = className;
+    if (text !== undefined) node.textContent = String(text);
+    return node;
+  }
+  function run(name, ...args) {
+    return new Promise((resolve, reject) =>
+      google.script.run.withSuccessHandler(resolve).withFailureHandler(reject)[name](...args));
+  }
+  function loading() {
+    const box = el('div');
+    box.append(el('div', 'spinner'), el('p', 'muted', 'できることを調べています'));
+    app.replaceChildren(box);
+  }
+  function failure(error) {
+    const box = el('div', 'notice error');
+    box.append(el('strong', '', '一覧を表示できませんでした'),
+      el('p', '', (error && error.message) || 'スプレッドシートを開き直して、もう一度お試しください。'));
+    app.replaceChildren(box);
+  }
+  function factList(label, items) {
+    const box = el('div', 'fact');
+    box.append(el('strong', '', label));
+    const list = el('ul');
+    items.forEach((item) => list.append(el('li', '', item)));
+    box.append(list);
+    return box;
+  }
+
+  function card(feature) {
+    const box = el('article', 'feature-card'
+      + (feature.enabled ? '' : ' blocked')
+      + (feature.destructive ? ' destructive' : ''));
+    const head = el('div', 'card-head');
+    const title = el('h3');
+    title.append(document.createTextNode(feature.title));
+    if (feature.visibility === 'DEVELOPMENT_ONLY') title.append(el('span', 'badge-dev', '開発用'));
+    head.append(title);
+    head.append(el('span', 'state ' + (feature.enabled ? 'usable' : 'blocked'),
+      feature.enabled ? '今すぐ使えます' : '今は使えません'));
+    box.append(head);
+    box.append(el('p', 'purpose', feature.whatItDoes));
+
+    const facts = el('div', 'facts');
+    facts.append(factList('作るもの・変わるもの', feature.whatChanges));
+    facts.append(factList('変えないもの', feature.whatDoesNotChange));
+    box.append(facts);
+
+    const when = el('p', 'muted');
+    when.append(el('strong', '', 'いつ使うか：'), document.createTextNode(feature.whenToUse));
+    box.append(when);
+
+    if (!feature.enabled && feature.blockedReason) {
+      box.append(el('p', 'blocked-reason', feature.blockedReason));
+    }
+    box.append(el('p', 'location', feature.locationText));
+
+    const flags = [];
+    if (feature.confirmBeforeRun) flags.push('実行する前に確認画面が出ます');
+    if (feature.destructive) flags.push('元に戻せません');
+    if (flags.length) box.append(el('p', 'flags', flags.join(' / ')));
+    return box;
+  }
+
+  function render(data) {
+    const header = el('header');
+    header.append(el('h1', '', 'この管理表でできること'));
+    const status = el('div', 'status');
+    status.append(
+      el('span', 'pill', '現在：' + data.modeLabel),
+      el('span', 'pill', '疑似申請に使う名簿：' + data.rosterSourceLabel),
+      el('span', 'pill', '今すぐ使える操作 ' + data.usableCount + ' / ' + data.visibleCount),
+    );
+    header.append(status);
+    header.append(el('p', 'muted', data.modeNote));
+    header.append(el('p', 'muted',
+      '今のモードで使えない操作は、この一覧に出していません。'
+      + '「今は使えません」と出ている操作は、書かれていることを先に済ませると使えるようになります。'));
+
+    const toc = el('nav', 'toc');
+    data.categories.forEach((category) => {
+      const link = el('a', '', category.title);
+      link.href = '#category-' + category.key;
+      toc.append(link);
+    });
+
+    const sections = data.categories.map((category) => {
+      const section = el('section', 'category');
+      section.id = 'category-' + category.key;
+      const head = el('div', 'category-head');
+      head.append(el('h2', '', category.title), el('p', 'muted', category.description));
+      section.append(head);
+      const cards = el('div', 'cards');
+      category.features.forEach((feature) => cards.append(card(feature)));
+      section.append(cards);
+      return section;
+    });
+
+    app.replaceChildren(header, toc, ...sections);
+  }
+
+  (async function load() {
+    loading();
+    try { render(await run('getFeatureGuideData')); } catch (error) { failure(error); }
+  })();
+</script>
+</body>
+</html>

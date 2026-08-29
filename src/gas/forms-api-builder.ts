@@ -1,4 +1,10 @@
-import { buildCorrectionSlotDefinitions } from '../core/settings';
+import {
+  buildCorrectionSlotDefinitions,
+  CORRECTION_BRANCH_HELP,
+  CORRECTION_PAGE_HELP,
+  correctionSectionPageTitle,
+  type CorrectionSection,
+} from '../core/settings';
 import {
   STUDENT_ID_RESPONSE_ERROR,
   STUDENT_ID_RESPONSE_PATTERN,
@@ -169,7 +175,7 @@ export function addNormalEventChunkViaApi(
   const id = (key: string): string => stableItemId(seed, `normal:${grade}:${event.eventId}:${key}`);
   const items: ApiItemDefinition[] = [
     definition(textDisplay(id('header'), `${event.eventName}（${event.category}）`,
-      `必要人数：${event.requiredCount}人`), 'normal'),
+      `必要人数：${event.requiredCount}人。学籍番号（半角数字4桁）だけを入力します。氏名は名簿から自動で照合します。`), 'normal'),
   ];
   for (let index = 1; index <= event.requiredCount; index += 1) {
     const slot = String(index).padStart(2, '0');
@@ -181,11 +187,8 @@ export function addNormalEventChunkViaApi(
       'normal', fieldKey, event.eventId, 'multiple_choice', event.displayOrder * 100 + index * 10));
     }
     const studentIdKey = `${event.eventId}_slot${slot}_student_id`;
-    const nameKey = `${event.eventId}_slot${slot}_name`;
     items.push(definition(textQuestion(id(studentIdKey), `${event.eventName} ${label} 学籍番号`, !event.vacancyAllowed),
       'normal', studentIdKey, event.eventId, 'text', event.displayOrder * 100 + index * 10 + 1));
-    items.push(definition(textQuestion(id(nameKey), `${event.eventName} ${label} 氏名`, !event.vacancyAllowed),
-      'normal', nameKey, event.eventId, 'text', event.displayOrder * 100 + index * 10 + 2));
   }
   return batchCreateItems(formId, startIndex, items);
 }
@@ -207,36 +210,43 @@ export function addCorrectionFormBaseViaApi(
     definition(textQuestion(id('correction_reason'), '修正する理由と変更内容', true, true),
       'correction', 'correction_reason', '', 'paragraph_text', 3),
     definition(choiceQuestion(questionId, '修正する競技', ['準備中'], 'RADIO',
-      '1回の送信で修正できる競技は1つです。選んだ競技の全選手を入力してください。'),
+      CORRECTION_BRANCH_HELP),
     'correction', 'correction_event_id', '', 'multiple_choice', 10),
   ];
   return { nextIndex: batchCreateItems(formId, startIndex, items), questionId };
 }
 
+/**
+ * 競技1件ずつ作る。セクションの先頭競技のときだけページ区切りを先頭へ付け、そのIDを返す。
+ * 2件目以降は同じページへ続けて追加するため`pageId`は`undefined`になる。
+ */
 export function addCorrectionEventChunkViaApi(
   formId: string,
   seed: string,
   startIndex: number,
   event: EventSetting,
-): { nextIndex: number; pageId: string } {
+  newSection: CorrectionSection | undefined,
+): { nextIndex: number; pageId: string | undefined } {
   const id = (key: string): string => stableItemId(seed, `correction:${event.eventId}:${key}`);
-  const pageId = id('page');
-  const items: ApiItemDefinition[] = [
-    definition(pageBreak(pageId, `${event.eventName}（${event.category}）をすべて入力`,
-      '変更した人だけでなく、この競技に登録する全員を入力してください。'), 'correction'),
-  ];
+  const pageId = newSection ? id('page') : undefined;
+  const items: ApiItemDefinition[] = [];
+  if (pageId && newSection) {
+    items.push(definition(pageBreak(pageId, correctionSectionPageTitle(newSection),
+      CORRECTION_PAGE_HELP), 'correction'));
+  }
+  // 1ページへ複数の競技が並ぶため、競技名の見出しを必ず付ける。
+  items.push(definition(textDisplay(id('header'), `${event.eventName}（${event.category}）`,
+    `必要人数：${event.requiredCount}人。この競技に登録する全員を入力してください。`), 'correction'));
   for (const slot of buildCorrectionSlotDefinitions(event)) {
     if (event.vacancyAllowed) {
-      items.push(definition(choiceQuestion(id(slot.stateFieldKey), `${slot.label} 登録状態`,
+      items.push(definition(choiceQuestion(id(slot.stateFieldKey),
+        `${event.eventName} ${slot.label} 登録状態`,
         ['選手を登録する', '現在調整中', '出場しない'], 'RADIO'),
       'correction', slot.stateFieldKey, event.eventId, 'multiple_choice', event.displayOrder * 100 + slot.index * 10));
     }
     items.push(definition(textQuestion(id(slot.studentIdFieldKey),
       `${event.eventName} ${slot.label} 学籍番号`, !event.vacancyAllowed),
     'correction', slot.studentIdFieldKey, event.eventId, 'text', event.displayOrder * 100 + slot.index * 10 + 1));
-    items.push(definition(textQuestion(id(slot.nameFieldKey),
-      `${event.eventName} ${slot.label} 氏名`, !event.vacancyAllowed),
-    'correction', slot.nameFieldKey, event.eventId, 'text', event.displayOrder * 100 + slot.index * 10 + 2));
   }
   return { nextIndex: batchCreateItems(formId, startIndex, items), pageId };
 }
@@ -268,11 +278,11 @@ export function finalizeNormalFormViaApi(
 export function finalizeCorrectionFormViaApi(
   formId: string,
   questionId: string,
-  events: EventSetting[],
+  sections: CorrectionSection[],
   pageIds: string[],
 ): void {
-  updateBranchQuestion(formId, questionId, 5, '修正する競技', events.map((event) =>
-    `${event.eventName}（${event.category} / ${event.eventId}）`), pageIds);
+  updateBranchQuestion(formId, questionId, 5, '修正する競技',
+    sections.map((section) => section.choice), pageIds);
   applyFormAppOnlyFeatures(formId);
 }
 
