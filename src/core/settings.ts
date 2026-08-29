@@ -5,6 +5,7 @@ import type {
   SettingsIssue,
 } from '../shared/types';
 import { validateRuleExpression } from './rule-expression';
+import { buildEventRosterPages, displayOrderBlockKey } from './roster';
 
 const TARGET_GRADES = new Set(['全学年', '1年', '2年', '3年']);
 const EVENT_CATEGORIES = new Set(['男子', '女子', '混合', 'クラス', 'その他']);
@@ -70,24 +71,29 @@ export function validateSettings(
     targetId: string, rowNumber: number, title: string, instruction: string,
   ): void => { issues.push({ category, severity, targetId, rowNumber, title, instruction }); };
 
+  const designRow = (
+    key: 'year' | 'normalTitle' | 'correctionTitle' | 'deadline' | 'loginRequired',
+    fallbackRow: number,
+  ): number => form.rowNumbers?.[key] ?? fallbackRow;
+
   if (!Number.isInteger(form.year) || form.year < 2000) {
-    add('フォーム設計', 'ERROR', '年度', 2, '年度が正しくありません',
+    add('フォーム設計', 'ERROR', '年度', designRow('year', 2), '年度が正しくありません',
       '「フォーム設計」シートの年度に、西暦を半角数字4桁で入力してください（例：2026）。');
   }
   if (!form.normalTitle.trim()) {
-    add('フォーム設計', 'ERROR', '通常フォームタイトル', 3, '通常フォームのタイトルが空欄です',
+    add('フォーム設計', 'ERROR', '通常フォームタイトル', designRow('normalTitle', 3), '通常フォームのタイトルが空欄です',
       '「フォーム設計」シートの通常フォームタイトルを入力してください。');
   }
   if (!form.correctionTitle.trim()) {
-    add('フォーム設計', 'ERROR', '修正フォームタイトル', 4, '修正フォームのタイトルが空欄です',
+    add('フォーム設計', 'ERROR', '修正フォームタイトル', designRow('correctionTitle', 4), '修正フォームのタイトルが空欄です',
       '「フォーム設計」シートの修正フォームタイトルを入力してください。');
   }
   if (!parseCalendarDate(form.deadline)) {
-    add('フォーム設計', 'ERROR', '締切', 5, '締切日が正しくありません',
+    add('フォーム設計', 'ERROR', '締切', designRow('deadline', 5), '締切日が正しくありません',
       '「フォーム設計」シートの締切セルをクリックし、カレンダーから日付を選んでください。例：2026/09/13(日)');
   }
   if (!form.loginRequired) {
-    add('フォーム設計', 'ERROR', 'ログイン必須', 7, '回答者のGoogleログインが無効です',
+    add('フォーム設計', 'ERROR', 'ログイン必須', designRow('loginRequired', 7), '回答者のGoogleログインが無効です',
       'Gmailアカウントで運用する場合も、回答者メールを記録するため「ログイン必須」にチェックを入れてください。');
   }
 
@@ -169,7 +175,7 @@ export function validateSettings(
       const expressionError = validateRuleExpression(expression);
       if (expressionError) add('ルール設定', 'ERROR', id || `行${row}`, row, '論理式を確認してください',
         `「ルール設定」シートの${row}行目の論理式を直してください。${expressionError}`);
-    } else if (!rule.condition.trim()) {
+    } else {
       add('ルール設定', 'ERROR', id || `行${row}`, row, '論理式が空欄です',
         `「ルール設定」シートの${row}行目に、TRUEまたはFALSEになる論理式を入力してください。例：M >= 2 && F >= 2`);
     }
@@ -267,7 +273,85 @@ export interface CorrectionSlotDefinition {
   label: string;
   stateFieldKey: string;
   studentIdFieldKey: string;
-  nameFieldKey: string;
+}
+
+export interface CorrectionSection {
+  /** 表示順を100で割った商。セクションの識別子。名簿のページ分けと同じ区切り。 */
+  key: number;
+  /** ページ見出しと「修正する競技」の選択肢に使う名前。 */
+  title: string;
+  /** 選択肢の文言。フォーム作成・疑似データ・実機テストで必ず同じ文字列を使う。 */
+  choice: string;
+  events: EventSetting[];
+}
+
+export function correctionSectionKey(event: EventSetting): number {
+  return displayOrderBlockKey(event.displayOrder);
+}
+
+/** 競技名の共通部分を返す。「棒引き 1~4回戦チーム1」等から「棒引き」を取り出す。 */
+function commonEventPrefix(events: EventSetting[]): string {
+  const names = events.map((event) => event.eventName);
+  const first = names[0] ?? '';
+  let length = first.length;
+  names.forEach((name) => {
+    let index = 0;
+    while (index < length && index < name.length && name[index] === first[index]) index += 1;
+    length = index;
+  });
+  const prefix = first.slice(0, length);
+  // 区切り文字までさかのぼる。「騎馬(全角空白)騎馬上」のように語の途中で切れた名前を避ける。
+  const cut = Math.max(
+    prefix.lastIndexOf(' '), prefix.lastIndexOf('　'),
+    prefix.lastIndexOf('・'), prefix.lastIndexOf('-'), prefix.lastIndexOf('ー'),
+  );
+  return (cut >= 0 ? prefix.slice(0, cut) : prefix).trim();
+}
+
+/** セクションのページ見出しと選択肢の文言。競技名が揃っていなくても必ず読める形にする。 */
+function sectionLabels(events: EventSetting[]): { title: string; choice: string } {
+  const first = events[0]!;
+  if (events.length === 1) {
+    return { title: first.eventName, choice: `${first.eventName}（${first.category} / ${first.eventId}）` };
+  }
+  const prefix = commonEventPrefix(events);
+  if (prefix) return { title: prefix, choice: `${prefix}（${events.length}競技）` };
+  const fallback = `${first.eventName} ほか${events.length - 1}競技`;
+  return { title: fallback, choice: fallback };
+}
+
+/**
+ * 表示順を100ごとに区切って修正フォームのセクションを作る。同じセクションの競技は
+ * 1ページにまとめ、「修正する競技」で1つ選ぶと、その中の全競技を入力してもらう。
+ * 競技は表示順で並んでいる前提で、選択肢の文言はセクションごとに一意にする。
+ */
+export function buildCorrectionSections(events: EventSetting[]): CorrectionSection[] {
+  const usedChoices = new Set<string>();
+  return buildEventRosterPages(events).map((page) => {
+    const { title, choice: base } = sectionLabels(page.events);
+    // 選択肢の文言が重なると分岐先を取り違えるため、必ず一意にする。
+    const choice = usedChoices.has(base)
+      ? `${base}［${page.events[0]?.eventId ?? page.blockKey}］`
+      : base;
+    usedChoices.add(choice);
+    return { key: page.blockKey, title, choice, events: page.events };
+  });
+}
+
+export const CORRECTION_BRANCH_HELP = '1回の送信で修正できるのは1つのまとまりです。選んだまとまりに含まれる競技の全選手を入力してください。';
+
+export const CORRECTION_PAGE_HELP = '変更した人だけでなく、このページにある全競技の登録選手をすべて入力してください。学籍番号（半角数字4桁）だけを入力します。氏名は名簿から自動で照合します。';
+
+export function correctionSectionPageTitle(section: CorrectionSection): string {
+  return `${section.title}をすべて入力`;
+}
+
+/** 競技が属するセクションの先頭かどうか。表示順で並んだ配列に対して使う。 */
+export function startsCorrectionSection(events: EventSetting[], index: number): boolean {
+  const event = events[index];
+  if (!event) return false;
+  const previous = events[index - 1];
+  return !previous || correctionSectionKey(previous) !== correctionSectionKey(event);
 }
 
 export function buildCorrectionSlotDefinitions(event: EventSetting): CorrectionSlotDefinition[] {
@@ -280,7 +364,6 @@ export function buildCorrectionSlotDefinitions(event: EventSetting): CorrectionS
       label: event.hasOrder ? `第${index}走者` : `${index}人目`,
       stateFieldKey: `correction_${event.eventId}_slot${slot}_state`,
       studentIdFieldKey: `correction_${event.eventId}_slot${slot}_student_id`,
-      nameFieldKey: `correction_${event.eventId}_slot${slot}_name`,
     };
   });
 }

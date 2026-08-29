@@ -1,4 +1,5 @@
-import type { FormRegistryRow } from '../shared/types';
+import { appliesToGrade } from './settings';
+import type { EventSetting, FormRegistryRow } from '../shared/types';
 
 export interface ActualFormItem {
   itemId: string;
@@ -12,30 +13,53 @@ export interface FormStructureDifference {
   message: string;
 }
 
+/** 通常フォームが持つ学年ページ。全学年の競技は各学年ページへ1組ずつ出す。 */
+const NORMAL_FORM_GRADES = [1, 2, 3] as const;
+
 const normalizedType = (value: string): string => value.trim().toLowerCase();
+
+/**
+ * 1つのfield_keyが同じフォームへ何回登録されるはずかを返す。
+ * 通常フォームの競技設問は学年ページごとに作るため、全学年の競技では学年数だけ増える。
+ * 競技設定に見つからないevent_idは、誤って公開を止めないよう最大値（学年数）まで許す。
+ */
+function expectedRowCount(row: FormRegistryRow, eventsById: Map<string, EventSetting>): number {
+  if (row.formType !== 'normal' || row.eventId === '') return 1;
+  const event = eventsById.get(row.eventId);
+  if (!event) return NORMAL_FORM_GRADES.length;
+  return NORMAL_FORM_GRADES.filter((grade) => appliesToGrade(event, grade)).length || 1;
+}
 
 export function inspectFormStructure(
   registryRows: FormRegistryRow[],
   actualItems: ActualFormItem[],
+  events: EventSetting[] = [],
 ): FormStructureDifference[] {
   const differences: FormStructureDifference[] = [];
   const enabled = registryRows.filter((row) => row.enabled);
-  const seenFields = new Set<string>();
+  const eventsById = new Map(events.map((event) => [event.eventId, event]));
+  const rowsByFieldKey = new Map<string, FormRegistryRow[]>();
+  enabled.forEach((row) => {
+    const grouped = rowsByFieldKey.get(row.fieldKey) ?? [];
+    grouped.push(row);
+    rowsByFieldKey.set(row.fieldKey, grouped);
+  });
+  rowsByFieldKey.forEach((grouped, fieldKey) => {
+    const expected = expectedRowCount(grouped[0]!, eventsById);
+    if (grouped.length <= expected) return;
+    differences.push({
+      code: 'DUPLICATE_FIELD_KEY',
+      message: `field_key「${fieldKey}」が${grouped.length}件あります（想定は${expected}件）。`,
+    });
+  });
   const seenItems = new Set<string>();
   enabled.forEach((row) => {
-    if (seenFields.has(row.fieldKey)) {
-      differences.push({
-        code: 'DUPLICATE_FIELD_KEY',
-        message: `field_key「${row.fieldKey}」が重複しています。`,
-      });
-    }
     if (seenItems.has(row.itemId)) {
       differences.push({
         code: 'DUPLICATE_ITEM_ID',
         message: `設問ID「${row.itemId}」が重複しています。`,
       });
     }
-    seenFields.add(row.fieldKey);
     seenItems.add(row.itemId);
   });
 

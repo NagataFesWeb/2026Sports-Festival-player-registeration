@@ -221,7 +221,7 @@ describe('疑似フォーム回答の検査', () => {
     })).toThrow('登録枠');
   });
 
-  it('複数の重複ルールを同時に守るよう疑似選手を分散する', () => {
+  it('登録枠が生徒数を超えても、同じ競技内で重複させずに枠を埋める', () => {
     const students = generateMockStudents();
     const classSize = students.filter((candidate) => candidate.grade === 1 && candidate.classNumber === 1).length;
     const events: EventSetting[] = [
@@ -229,16 +229,12 @@ describe('疑似フォーム回答の検査', () => {
       { ...event, eventId: 'E003', eventName: '学年競技', requiredCount: classSize - 1, displayOrder: 2, vacancyAllowed: false },
       { ...event, eventId: 'E002', eventName: '女子リレー', requiredCount: 1, displayOrder: 3, vacancyAllowed: false },
     ];
+    // ルールは論理式で書く。疑似データの割り当ては論理式を読まず、
+    // 同じ競技内で重複させないことと、全体をできるだけ均等にすることだけを守る。
     const rules = [
-      { ruleId: 'R003', enabled: true, ruleName: '同一競技内の重複登録は禁止', target: '全競技' as const,
-        targetEventIds: 'E001,E002,E003', condition: '同一生徒の重複', limit: 1, judgment: 'エラー' as const,
-        displayMessage: '', note: '' },
       { ruleId: 'R005', enabled: true, ruleName: '1人あたりの出場数上限', target: '全競技' as const,
-        targetEventIds: 'E001,E002,E003', condition: '同一生徒の登録数', limit: 2, judgment: '警告' as const,
-        displayMessage: '', note: '' },
-      { ruleId: 'R006', enabled: true, ruleName: 'リレー重複制限', target: '指定競技' as const,
-        targetEventIds: 'E001,E002', condition: '同一生徒の登録数', limit: 1, judgment: 'エラー' as const,
-        displayMessage: '', note: '' },
+        targetEventIds: '', condition: '', limit: Number.NaN, judgment: '警告' as const,
+        displayMessage: '', note: '', expression: 'MAX_PER_STUDENT <= 2' },
     ];
     const generated = generateMockSubmissions({
       year: 2026, normalFormId: 'normal-form', correctionFormId: 'correction-form',
@@ -253,9 +249,18 @@ describe('疑似フォーム回答の検査', () => {
       submissionCount: 1, targetGrades: [1], targetClasses: [1], targetFormTypes: ['normal'],
       errorSubmissionCount: 0, warningSubmissionCount: 0,
     });
-    const relayItems = generated.items.filter((item) => item.eventId === 'E001' || item.eventId === 'E002');
-    expect(relayItems).toHaveLength(2);
-    expect(new Set(relayItems.map((item) => item.studentIdInput)).size).toBe(2);
+    expect(generated.items).toHaveLength(classSize + 1);
+    expect(generated.items.every((item) => item.studentIdInput !== '')).toBe(true);
+    const countsByEvent = new Map<string, string[]>();
+    generated.items.forEach((item) => {
+      countsByEvent.set(item.eventId, [...(countsByEvent.get(item.eventId) ?? []), item.studentIdInput]);
+    });
+    countsByEvent.forEach((ids) => expect(new Set(ids).size).toBe(ids.length));
+    const usage = new Map<string, number>();
+    generated.items.forEach((item) =>
+      usage.set(item.studentIdInput, (usage.get(item.studentIdInput) ?? 0) + 1));
+    expect(Math.max(...usage.values())).toBe(2);
+    expect([...usage.values()].filter((count) => count === 2)).toHaveLength(1);
   });
 
   it('欠員許可の競技は生徒数を超えた枠を空けて警告だけにする', () => {

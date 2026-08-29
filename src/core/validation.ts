@@ -19,9 +19,7 @@ export const ISSUE_CODES = {
   STUDENT_NOT_FOUND: 'STUDENT_NOT_FOUND',
   STUDENT_CLASS_MISMATCH: 'STUDENT_CLASS_MISMATCH',
   REQUIRED_SLOT_MISSING: 'REQUIRED_SLOT_MISSING',
-  DUPLICATE_STUDENT: 'DUPLICATE_STUDENT',
   VACANCY_CAPACITY_SHORTFALL: 'VACANCY_CAPACITY_SHORTFALL',
-  STUDENT_NAME_MISMATCH: 'STUDENT_NAME_MISMATCH',
   MULTIPLE_INITIAL_SUBMISSIONS: 'MULTIPLE_INITIAL_SUBMISSIONS',
   PROXY_SUBMISSION: 'PROXY_SUBMISSION',
   REGISTRATION_PENDING: 'REGISTRATION_PENDING',
@@ -47,8 +45,8 @@ const ISSUE_TEXT: Record<IssueCode, IssueText> = {
     instruction: '学籍番号を「学年・組・出席番号」の半角数字4桁で入力してください（例：1年3組4番は1304）。',
   },
   STUDENT_NOT_FOUND: {
-    title: '学籍番号が確認できません',
-    instruction: '選手本人に学籍番号を確認し、正しい半角数字4桁へ直してください。',
+    title: '生徒マスターにない学籍番号です',
+    instruction: '入力ミスか、転入などで生徒マスターへ未登録かを確認してください。番号が誤っていれば直し、実在する生徒なら「生徒マスター」へ追加して再検査します。名簿へ載せる氏名が空欄のままでよければ、この警告を残したまま承認できます。',
   },
   STUDENT_CLASS_MISMATCH: {
     title: '別のクラスの学籍番号です',
@@ -56,19 +54,11 @@ const ISSUE_TEXT: Record<IssueCode, IssueText> = {
   },
   REQUIRED_SLOT_MISSING: {
     title: '必須の選手枠が埋まっていません',
-    instruction: 'この枠の選手を決め、「選手を登録する」を選んで学籍番号と氏名を入力してください。',
-  },
-  DUPLICATE_STUDENT: {
-    title: '同じ選手の登録がルールの上限を超えています',
-    instruction: '重複一覧を確認し、残す登録を決めてください。不要な登録は別の選手へ変更するか、「出場しない」へ直してください。',
+    instruction: 'この枠の選手を決め、「選手を登録する」を選んで学籍番号を入力してください。',
   },
   VACANCY_CAPACITY_SHORTFALL: {
     title: '欠員許可により選手を登録していない枠があります',
     instruction: '欠員を許可した競技なので、この警告を残したまま承認できます。実際には選手を登録する場合だけ、該当枠を修正してください。',
-  },
-  STUDENT_NAME_MISMATCH: {
-    title: '氏名の表記が生徒マスターと異なります',
-    instruction: '学籍番号が本人のものか確認してください。番号が正しければ、氏名を生徒マスターの表記へ直してください。',
   },
   MULTIPLE_INITIAL_SUBMISSIONS: {
     title: '同じクラスから複数の初回回答があります',
@@ -80,7 +70,7 @@ const ISSUE_TEXT: Record<IssueCode, IssueText> = {
   },
   REGISTRATION_PENDING: {
     title: '登録状態が「調整中」です',
-    instruction: '学籍番号と氏名は入力されていますが、まだ最終確定ではありません。サイドバーの「この項目を修正」から登録状態を「選手を登録する」または「出場しない」に変更し、修正理由を保存してください。',
+    instruction: '学籍番号は入力されていますが、まだ最終確定ではありません。サイドバーの「この項目を修正」から登録状態を「選手を登録する」または「出場しない」に変更し、修正理由を保存してください。',
   },
   CORRECTION_WHILE_CLOSED: {
     title: '受付停止中に届いた修正申請です',
@@ -108,9 +98,6 @@ export function validateSubmission(
   }));
   const studentsById = new Map(context.students.map((student) => [student.studentId, student]));
   const issues: ValidationIssue[] = [];
-  const requiredCountSeverity = configuredSeverity(context.rules, '必要人数', 'ERROR');
-  const studentMasterSeverity = configuredSeverity(context.rules, '生徒マスター存在確認', 'ERROR');
-  const nameMatchSeverity = configuredSeverity(context.rules, '氏名照合', 'WARNING');
 
   const addIssue = (
     code: IssueCode,
@@ -149,14 +136,13 @@ export function validateSubmission(
     addIssue(ISSUE_CODES.CORRECTION_WHILE_CLOSED, 'WARNING', firstItem, '受付停止中');
   }
 
-  const registeredByStudentId = new Map<string, SubmissionItem[]>();
   for (const item of normalizedItems) {
     const hasStudentInput = item.normalizedStudentId !== '' || item.normalizedName !== '';
-    if (requiredCountSeverity && item.required && item.registrationState === 'NOT_PARTICIPATING') {
-      addIssue(ISSUE_CODES.REQUIRED_SLOT_MISSING, requiredCountSeverity, item, registrationStateLabel(item.registrationState));
+    if (item.required && item.registrationState === 'NOT_PARTICIPATING') {
+      addIssue(ISSUE_CODES.REQUIRED_SLOT_MISSING, 'ERROR', item, registrationStateLabel(item.registrationState));
     }
-    if (requiredCountSeverity && item.required && item.registrationState === 'PENDING' && !hasStudentInput) {
-      addIssue(ISSUE_CODES.REQUIRED_SLOT_MISSING, requiredCountSeverity, item, registrationStateLabel(item.registrationState));
+    if (item.required && item.registrationState === 'PENDING' && !hasStudentInput) {
+      addIssue(ISSUE_CODES.REQUIRED_SLOT_MISSING, 'ERROR', item, registrationStateLabel(item.registrationState));
     }
     if (item.registrationState === 'PENDING') {
       addIssue(ISSUE_CODES.REGISTRATION_PENDING, 'WARNING', item, '調整中');
@@ -165,35 +151,30 @@ export function validateSubmission(
 
     const studentId = item.normalizedStudentId;
     if (studentId === '') {
-      if (studentMasterSeverity) addIssue(ISSUE_CODES.STUDENT_ID_MISSING, studentMasterSeverity, item, '未入力');
+      addIssue(ISSUE_CODES.STUDENT_ID_MISSING, 'ERROR', item, '未入力');
       continue;
     }
     if (!/^[1-3][1-8][0-9]{2}$/.test(studentId)) {
-      if (studentMasterSeverity) addIssue(ISSUE_CODES.STUDENT_ID_INVALID, studentMasterSeverity, item, item.studentIdInput);
+      addIssue(ISSUE_CODES.STUDENT_ID_INVALID, 'ERROR', item, item.studentIdInput);
       continue;
     }
 
     const student = studentsById.get(studentId);
     if (!student) {
-      if (studentMasterSeverity) addIssue(ISSUE_CODES.STUDENT_NOT_FOUND, studentMasterSeverity, item, studentId);
+      // 転入直後などで生徒マスターへ未登録の生徒が稀にいるため警告とする。エラーにすると
+      // クラス全体の申請が承認できず名簿作成が止まる。厳しくしたい年度は「ルール設定」へ
+      // 判定エラーの`INVALID_ID == 0`を追加する。
+      addIssue(ISSUE_CODES.STUDENT_NOT_FOUND, 'WARNING', item, studentId);
       continue;
     }
     if (student.grade !== submission.targetGrade || student.classNumber !== submission.targetClass) {
       addIssue(ISSUE_CODES.STUDENT_CLASS_MISMATCH, 'ERROR', item, studentId);
     }
-    if (nameMatchSeverity && item.normalizedName !== normalizeName(student.name)) {
-      addIssue(ISSUE_CODES.STUDENT_NAME_MISMATCH, nameMatchSeverity, item, item.studentNameInput || '未入力');
-    }
-
-    const duplicateItems = registeredByStudentId.get(studentId) ?? [];
-    duplicateItems.push(item);
-    registeredByStudentId.set(studentId, duplicateItems);
   }
 
   addExpressionRuleIssues(
     submission, normalizedItems, studentsById, context.rules, addIssue,
   );
-  addDuplicateIssues(registeredByStudentId, studentsById, context.rules, addIssue);
   addVacancyWarnings(normalizedItems, addIssue);
 
   const warningCount = issues.filter((issue) => issue.severity === 'WARNING').length;
@@ -229,6 +210,8 @@ function expressionValues(
   const female = students.filter((student) => student?.gender === 'F').length;
   const invalidId = registered.filter((item) => !studentsById.has(item.normalizedStudentId)).length;
   const nameMismatch = registered.filter((item) => {
+    // 氏名の入力がある回答だけを数える。学籍番号のみのフォームでは常に0になる。
+    if (item.studentNameInput.trim() === '') return false;
     const student = studentsById.get(item.normalizedStudentId);
     return Boolean(student && normalizeName(student.name) !== item.normalizedName);
   }).length;
@@ -238,6 +221,14 @@ function expressionValues(
       && (student.grade !== submission.targetGrade || student.classNumber !== submission.targetClass));
   }).length;
   const maximum = Math.max(0, ...counts.values());
+  // 同じ競技の中で同じ生徒が何回登録されているかの最大値。競技をまたぐ出場は数えない。
+  const countsPerEvent = new Map<string, number>();
+  registered.forEach((item) => {
+    if (!item.normalizedStudentId) return;
+    const key = `${item.eventId}:${item.normalizedStudentId}`;
+    countsPerEvent.set(key, (countsPerEvent.get(key) ?? 0) + 1);
+  });
+  const maximumPerEvent = Math.max(0, ...countsPerEvent.values());
   return {
     M: male,
     F: female,
@@ -248,6 +239,7 @@ function expressionValues(
     UNIQUE: new Set(ids).size,
     DUPLICATE: [...counts.values()].reduce((total, count) => total + Math.max(0, count - 1), 0),
     MAX_PER_STUDENT: maximum,
+    MAX_PER_EVENT: maximumPerEvent,
     INVALID_ID: invalidId,
     NAME_MISMATCH: nameMismatch,
     CLASS_MISMATCH: classMismatch,
@@ -271,7 +263,8 @@ function addExpressionRuleIssues(
     if (targetItems.length === 0) return;
     const values = expressionValues(submission, targetItems, studentsById);
     const valueText = `M=${values.M}, F=${values.F}, N=${values.N}, UNKNOWN=${values.UNKNOWN}, `
-      + `EMPTY=${values.EMPTY}, UNIQUE=${values.UNIQUE}, MAX_PER_STUDENT=${values.MAX_PER_STUDENT}`;
+      + `EMPTY=${values.EMPTY}, UNIQUE=${values.UNIQUE}, MAX_PER_STUDENT=${values.MAX_PER_STUDENT}, `
+      + `MAX_PER_EVENT=${values.MAX_PER_EVENT}`;
     try {
       if (evaluateRuleExpression(rule.expression ?? '', values)) return;
       const eventNames = [...new Set(targetItems.map((item) => item.eventName))];
@@ -318,103 +311,6 @@ function addVacancyWarnings(
       locationText: `${eventName} / ${vacancies.map((item) => item.slotName).join('、')}`,
     });
   }
-}
-
-function configuredSeverity(
-  rules: RuleSetting[] | undefined,
-  condition: string,
-  fallback: Severity,
-): Severity | undefined {
-  if (!rules) return fallback;
-  const rule = rules.find((candidate) => candidate.enabled && candidate.condition.includes(condition));
-  if (!rule) return undefined;
-  return rule.judgment === '警告' ? 'WARNING' : 'ERROR';
-}
-
-interface DuplicateViolation {
-  items: Map<string, SubmissionItem>;
-  limit: number;
-  severity: Severity;
-  ruleNames: Set<string>;
-}
-
-function addDuplicateIssues(
-  registeredByStudentId: Map<string, SubmissionItem[]>,
-  studentsById: Map<string, ValidationContext['students'][number]>,
-  rules: RuleSetting[] | undefined,
-  addIssue: (
-    code: IssueCode, severity: Severity, item: SubmissionItem | undefined,
-    currentValue: string,
-    override?: Partial<Pick<ValidationIssue, 'displayTitle' | 'locationText' | 'fixInstruction'>>,
-  ) => void,
-): void {
-  const plans = duplicateRulePlans(rules);
-  const violations = new Map<string, DuplicateViolation>();
-  for (const plan of plans) {
-    const applicable = new Set(plan.eventIds);
-    for (const [studentId, allItems] of registeredByStudentId) {
-      const targetItems = allItems.filter((item) => plan.allEvents
-        || applicable.has(item.eventId)
-        || (plan.target === 'リレー' && item.eventName.includes('リレー'))
-        || (plan.target === '個人種目' && !item.eventName.includes('リレー')));
-      const eventGroups = new Map<string, SubmissionItem[]>();
-      if (plan.perEvent) targetItems.forEach((item) => {
-        const group = eventGroups.get(item.eventId) ?? [];
-        group.push(item);
-        eventGroups.set(item.eventId, group);
-      });
-      const groups = plan.perEvent ? [...eventGroups.values()] : [targetItems];
-      for (const group of groups) {
-        if (group.length <= plan.limit) continue;
-        const violation = violations.get(studentId) ?? {
-          items: new Map(), limit: plan.limit, severity: plan.severity, ruleNames: new Set(),
-        };
-        group.forEach((item) => violation.items.set(item.submissionItemId, item));
-        violation.limit = Math.min(violation.limit, plan.limit);
-        if (plan.severity === 'ERROR') violation.severity = 'ERROR';
-        violation.ruleNames.add(plan.ruleName);
-        violations.set(studentId, violation);
-      }
-    }
-  }
-  for (const [studentId, violation] of violations) {
-    const items = [...violation.items.values()];
-    const studentName = studentsById.get(studentId)?.name ?? items[0]?.studentNameInput ?? '氏名未確認';
-    const locations = items.map((item) => `${item.eventName} / ${item.slotName}`).join('、');
-    addIssue(ISSUE_CODES.DUPLICATE_STUDENT, violation.severity, undefined, studentId, {
-      displayTitle: `学籍番号${studentId}（${studentName}）が${items.length}件の登録で重複しています`,
-      locationText: locations,
-      fixInstruction: `下の${items.length}件を確認し、ルール上限の${violation.limit}件だけを残してください。不要な登録は「この項目を修正」から別の選手へ変更するか、「出場しない」へ直してください。対象ルール：${[...violation.ruleNames].join('、')}`,
-    });
-  }
-}
-
-interface DuplicateRulePlan {
-  ruleName: string;
-  limit: number;
-  severity: Severity;
-  allEvents: boolean;
-  target: RuleSetting['target'];
-  eventIds: string[];
-  perEvent: boolean;
-}
-
-function duplicateRulePlans(rules: RuleSetting[] | undefined): DuplicateRulePlan[] {
-  if (!rules) return [{
-    ruleName: '同一選手の重複', limit: 1, severity: 'ERROR', allEvents: true,
-    eventIds: [], perEvent: false, target: '全競技',
-  }];
-  return rules
-    .filter((rule) => rule.enabled && rule.condition.includes('同一生徒'))
-    .map((rule) => ({
-      ruleName: rule.ruleName || rule.ruleId,
-      limit: Number.isFinite(rule.limit) && rule.limit >= 1 ? Math.trunc(rule.limit) : 1,
-      severity: rule.judgment === '警告' ? 'WARNING' as const : 'ERROR' as const,
-      allEvents: rule.target === '全競技',
-      target: rule.target,
-      eventIds: rule.targetEventIds.split(',').map((value) => value.trim()).filter(Boolean),
-      perEvent: rule.condition.includes('重複') && !rule.condition.includes('登録数'),
-    }));
 }
 
 function registrationStateLabel(state: SubmissionItem['registrationState']): string {

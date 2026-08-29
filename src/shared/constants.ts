@@ -20,6 +20,7 @@ export const SHEETS = {
   ,systemConfig: 'システム設定',
   settingsChangeHistory: '設定変更履歴',
   publicSettingsSnapshot: '公開設定スナップショット',
+  liveFormTest: '実機テスト',
 } as const;
 
 export const SYSTEM_CONFIG_HEADERS = ['項目', '値'] as const;
@@ -37,6 +38,8 @@ export const SCRIPT_PROPERTIES = {
   publicSettingsLocked: 'PUBLIC_SETTINGS_LOCKED',
   settingsChangeActive: 'SETTINGS_CHANGE_ACTIVE',
   settingsChangeReason: 'SETTINGS_CHANGE_REASON',
+  ruleChangeActive: 'RULE_CHANGE_ACTIVE',
+  ruleChangeReason: 'RULE_CHANGE_REASON',
 } as const;
 
 export const SETTINGS_CHANGE_HISTORY_HEADERS = [
@@ -78,7 +81,7 @@ export const APPROVAL_HEADERS = [
 export const REGISTRATION_HEADERS = [
   'registration_id', 'source_submission_id', 'event_id', 'event_name',
   'slot_id', 'slot_name', 'student_id', 'student_name_snapshot', 'grade',
-  'class_number', 'version', 'updated_at', 'updated_by'
+  'class_number', 'version', 'updated_at', 'updated_by', 'gender_snapshot'
 ] as const;
 
 export const ROSTER_HISTORY_HEADERS = [
@@ -95,6 +98,8 @@ export const MOCK_DATA_SETTING_KEYS = {
   correctionFormEnabled: '作成するフォーム：修正フォーム',
   errorSubmissionCount: 'エラーを含む申請数',
   warningSubmissionCount: '警告を含む申請数',
+  rosterSource: '疑似申請に使う名簿',
+  rosterSourceStamp: '疑似申請を作成した名簿',
 } as const;
 
 export const CHANGE_HEADERS = [
@@ -130,4 +135,9 @@ export const SETTINGS_ISSUE_HEADERS = [
 export const RAW_FORM_RESPONSE_HEADERS = [
   'form_id', 'response_id', 'form_type', 'submitted_at', 'answer_json',
   'processing_status', 'submission_id', 'processed_at', 'error_code'
+] as const;
+
+export const LIVE_FORM_TEST_HEADERS = [
+  'case_id', 'form_type', 'テスト内容', '状態', '事前入力URL', 'response_id',
+  'submission_id', '取込経路', '判定', '差分', '実行日時', 'answer_json',
 ] as const;

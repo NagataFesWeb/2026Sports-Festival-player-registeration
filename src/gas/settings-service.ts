@@ -1,10 +1,14 @@
 import {
   appliesToGrade,
+  buildCorrectionSections,
   calculateFormBuildProgress,
+  correctionSectionKey,
   FORM_BUILD_BATCH_BUDGET_MS,
   FORM_BUILD_BATCH_MAX_CHUNKS,
   shouldProcessNextFormBuildChunk,
+  startsCorrectionSection,
   validateSettings,
+  type CorrectionSection,
   type SettingsValidationResult,
 } from '../core/settings';
 import { inspectFormStructure } from '../core/form-structure';
@@ -57,7 +61,9 @@ import {
   auditPendingSettingsChange,
   cancelPublishedSettingsChange,
   completePublishedSettingsChange,
+  isRuleOnlyChangeActive,
   isSettingsChangeActive,
+  isSettingsProtected,
 } from './settings-change-service';
 
 export interface DraftBuildResult {
@@ -103,6 +109,13 @@ export interface SettingsDashboardData {
 type FormBuildPhase = 'NORMAL_BASE' | 'NORMAL_EVENTS' | 'NORMAL_FINAL'
   | 'CORRECTION_BASE' | 'CORRECTION_EVENTS' | 'CORRECTION_FINAL' | 'FINALIZE';
 
+/**
+ * フォームの作り方。
+ * FORMS_API_V1はGoogle Forms APIへ質問をまとめて送るため速いが、APIの有効化と承認が必要になる。
+ * FORM_APPはApps Script標準のFormAppだけで作るため追加の承認が要らない。質問を1つずつ作るので時間はかかる。
+ */
+export type FormBuildMode = 'FORMS_API_V1' | 'FORM_APP';
+
 interface FormBuildJob {
   jobId: string;
   status: 'RUNNING' | 'ERROR';
@@ -123,7 +136,7 @@ interface FormBuildJob {
   correctionQuestionId: number;
   correctionEventIndex: number;
   correctionPageIds: number[];
-  buildMode?: 'FORMS_API_V1';
+  buildMode?: FormBuildMode;
   apiSeed?: string;
   normalApiItemCount?: number;
   correctionApiItemCount?: number;
@@ -220,7 +233,13 @@ export function validateSettingsFromUi(): SettingsDashboardData {
 }
 
 export function buildDraftFormsFromUi(): SettingsDashboardData {
-  buildDraftForms();
+  buildDraftForms('FORMS_API_V1');
+  return getSettingsDashboardData();
+}
+
+/** Google Forms APIを使わず、Apps Script標準のFormAppだけでフォームを作る。 */
+export function buildDraftFormsWithFormAppFromUi(): SettingsDashboardData {
+  buildDraftForms('FORM_APP');
   return getSettingsDashboardData();
 }
 
@@ -250,7 +269,7 @@ export function validateAndRenderSettings(): SettingsValidationResult {
   return result;
 }
 
-export function buildDraftForms(): DraftBuildResult {
+export function buildDraftForms(buildMode: FormBuildMode = 'FORMS_API_V1'): DraftBuildResult {
   assertAuthorized();
   const lock = LockService.getDocumentLock();
   if (!lock.tryLock(30_000)) throw new Error('ほかの担当者が設定を処理中です。少し待ってから、もう一度実行してください。');
@@ -258,6 +277,9 @@ export function buildDraftForms(): DraftBuildResult {
     const design = readFormDesign();
     if (design.formStatus === '公開前確認') {
       throw new Error('公開前確認中のフォームがあります。公開するか「公開前フォームを破棄」してから作り直してください。');
+    }
+    if (isRuleOnlyChangeActive()) {
+      throw new Error('ルール設定の変更中です。「ルール変更を確定して全申請を再検査」または「ルール変更を取り消す」を実行してから、フォームを作り直してください。');
     }
     const events = readEventSettings();
     const rules = readRuleSettings();
@@ -283,7 +305,7 @@ export function buildDraftForms(): DraftBuildResult {
       ...built,
       normalQuestionId: 0, normalGrade: 1, normalEventIndex: 0, normalPageIds: [],
       correctionQuestionId: 0, correctionEventIndex: 0, correctionPageIds: [],
-      buildMode: 'FORMS_API_V1', apiSeed: Utilities.getUuid(),
+      buildMode, apiSeed: Utilities.getUuid(),
       normalApiItemCount: 0, correctionApiItemCount: 0,
       normalPageApiIds: [], correctionPageApiIds: [],
       enabledEventCount: enabledEvents.length,
@@ -295,7 +317,9 @@ export function buildDraftForms(): DraftBuildResult {
     scheduleFormBuildContinuation();
     renderSettingsDashboard(result, design.year, '作成中');
     return {
-      message: 'フォーム下書きの分割作成を開始しました。設定画面を開いたまま進み具合を確認できます。',
+      message: buildMode === 'FORM_APP'
+        ? 'Google Forms APIを使わずにフォーム下書きの分割作成を開始しました。質問を1つずつ作るため、完成まで時間がかかります。設定画面を開いたまま進み具合を確認できます。'
+        : 'フォーム下書きの分割作成を開始しました。設定画面を開いたまま進み具合を確認できます。',
       normalEditUrl: '', correctionEditUrl: '', formsFolderUrl: built.formsFolderUrl,
     };
   } finally {
@@ -458,9 +482,11 @@ function processFormBuildChunk(
       return;
     }
     const event = orderedEvents[job.correctionEventIndex]!;
-    job.correctionPageIds.push(addCorrectionEventChunk(
+    const pageId = addCorrectionEventChunk(
       draftForm(forms, 'correction', job.correctionFormId), event,
-    ));
+      correctionSectionStartingAt(orderedEvents, job.correctionEventIndex),
+    );
+    if (pageId !== undefined) job.correctionPageIds.push(pageId);
     job.correctionEventIndex += 1;
     job.message = `修正フォーム：「${event.eventName}」まで作成しました。`;
     return;
@@ -468,7 +494,7 @@ function processFormBuildChunk(
   if (job.phase === 'CORRECTION_FINAL') {
     finalizeCorrectionFormBranches(
       draftForm(forms, 'correction', job.correctionFormId),
-      job.correctionQuestionId, orderedEvents, job.correctionPageIds,
+      job.correctionQuestionId, buildCorrectionSections(orderedEvents), job.correctionPageIds,
     );
     job.phase = 'FINALIZE';
     job.message = '2つのフォームを正式な下書きとして切り替えています。';
@@ -541,10 +567,11 @@ function processFormsApiBuildChunk(job: FormBuildJob, orderedEvents: EventSettin
     const event = orderedEvents[job.correctionEventIndex]!;
     const result = addCorrectionEventChunkViaApi(
       job.correctionFormId, seed, job.correctionApiItemCount ?? 0, event,
+      correctionSectionStartingAt(orderedEvents, job.correctionEventIndex),
     );
     job.correctionApiItemCount = result.nextIndex;
     const pageIds = job.correctionPageApiIds ?? [];
-    pageIds.push(result.pageId);
+    if (result.pageId !== undefined) pageIds.push(result.pageId);
     job.correctionPageApiIds = pageIds;
     job.correctionEventIndex += 1;
     job.message = `修正フォーム：「${event.eventName}」を一括作成しました。`;
@@ -554,12 +581,22 @@ function processFormsApiBuildChunk(job: FormBuildJob, orderedEvents: EventSettin
     finalizeCorrectionFormViaApi(
       job.correctionFormId,
       requiredApiId(job.correctionQuestionApiId),
-      orderedEvents,
+      buildCorrectionSections(orderedEvents),
       job.correctionPageApiIds ?? [],
     );
     job.phase = 'FINALIZE';
     job.message = '2つのフォームを正式な下書きとして切り替えています。';
   }
+}
+
+/** 表示順で並んだ競技配列の`index`がセクションの先頭なら、そのセクションを返す。 */
+function correctionSectionStartingAt(
+  orderedEvents: EventSetting[],
+  index: number,
+): CorrectionSection | undefined {
+  if (!startsCorrectionSection(orderedEvents, index)) return undefined;
+  const key = correctionSectionKey(orderedEvents[index]!);
+  return buildCorrectionSections(orderedEvents).find((section) => section.key === key);
 }
 
 function requiredApiId(value: string | undefined): string {
@@ -597,7 +634,10 @@ function finalizeFormBuild(job: FormBuildJob): void {
   renderSettingsDashboard(result, design.year, '公開前確認');
 }
 
-function assertGeneratedFormStructure(form: GoogleAppsScript.Forms.Form): void {
+function assertGeneratedFormStructure(
+  form: GoogleAppsScript.Forms.Form,
+  events: EventSetting[],
+): void {
   const answerItemTypes = new Set([
     'TEXT', 'PARAGRAPH_TEXT', 'MULTIPLE_CHOICE', 'LIST', 'CHECKBOX', 'SCALE',
     'GRID', 'CHECKBOX_GRID', 'DATE', 'DATETIME', 'TIME', 'DURATION',
@@ -609,7 +649,7 @@ function assertGeneratedFormStructure(form: GoogleAppsScript.Forms.Form): void {
       itemType: String(item.getType()),
     }))
     .filter((item) => answerItemTypes.has(item.itemType));
-  const differences = inspectFormStructure(readFormRegistry(form.getId()), actualItems);
+  const differences = inspectFormStructure(readFormRegistry(form.getId()), actualItems, events);
   if (differences.length === 0) return;
   const detail = differences.slice(0, 5).map((difference) => `・${difference.message}`).join('\n');
   throw new Error(
@@ -635,7 +675,8 @@ export function publishDraftForms(): PublishFormsResult {
       throw new Error('フォームと項目対応表を確認できません。公開せず、設定画面からフォームを作り直してください。');
     }
     const forms = formIds.map((formId) => FormApp.openById(formId));
-    forms.forEach(assertGeneratedFormStructure);
+    const events = readEventSettings();
+    forms.forEach((form) => assertGeneratedFormStructure(form, events));
     forms.forEach((form) => {
       const publishable = form as typeof form & {
         setPublished(enabled: boolean): GoogleAppsScript.Forms.Form;
@@ -775,6 +816,14 @@ function loadFormBuildJob(): FormBuildJob | undefined {
   return raw ? JSON.parse(raw) as FormBuildJob : undefined;
 }
 
+/**
+ * 途中まで作ったフォームが残っているかどうか。保存先はこのファイルだけが知っているので、
+ * メニューの有効・無効を決める側は自前で Properties を読まずにこれを呼ぶ。
+ */
+export function isFormBuildJobActive(): boolean {
+  return loadFormBuildJob() !== undefined;
+}
+
 function saveFormBuildJob(job: FormBuildJob): void {
   PropertiesService.getDocumentProperties().setProperty(FORM_BUILD_JOB_PROPERTY, JSON.stringify(job));
 }
@@ -806,8 +855,8 @@ function formBuildProgress(job: FormBuildJob): string {
 
 
 function studentContext(): { studentCount: number; classCountByGrade: Partial<Record<1 | 2 | 3, number>> } | undefined {
-  const spreadsheet = SpreadsheetApp.getActiveSpreadsheet();
-  if (!spreadsheet.getSheetByName(SHEETS.students)) return undefined;
+  // 疑似生徒マスターの有無ではなく、実際に使われる名簿の件数で判定する。
+  // 生徒マスターだけが入力されている状態でもクラス数を集計できるようにするため。
   const students = readStudents();
   if (students.length === 0) return undefined;
   const countClasses = (grade: 1 | 2 | 3): number => new Set(
@@ -840,6 +889,18 @@ export function openSettingsIssue(category: SettingsIssue['category'], rowNumber
   );
 }
 
+/** 設定シートを今すぐ編集できるかどうかを、担当者向けの言葉で表す。 */
+function settingsProtectionText(): string {
+  if (isRuleOnlyChangeActive()) {
+    return 'ルール設定だけ編集できます（変更中）。直したら「ルール変更を確定して全申請を再検査」を実行してください';
+  }
+  if (isSettingsChangeActive()) return '設定変更中です。編集後に「フォーム下書きを作成」から進めてください';
+  if (isSettingsProtected()) {
+    return '保護中です。競技設定・フォーム設計は「受付を停止して設定変更を開始」、ルールは「ルール設定だけを変更する」から変更してください';
+  }
+  return 'そのまま編集できます';
+}
+
 function renderSettingsDashboard(
   result: SettingsValidationResult,
   year: number,
@@ -852,6 +913,7 @@ function renderSettingsDashboard(
     ['体育祭 フォーム設定', ''],
     ['年度', `${year}年度`],
     ['フォーム状態', status],
+    ['設定の保護', settingsProtectionText()],
     ['競技設定', `警告 ${result.eventWarningCount}件 / エラー ${result.eventErrorCount}件`],
     ['ルール設定', `警告 ${result.ruleWarningCount}件 / エラー ${result.ruleErrorCount}件`],
     ['フォーム設計', `警告 ${result.formWarningCount}件 / エラー ${result.formErrorCount}件`],
@@ -862,7 +924,7 @@ function renderSettingsDashboard(
   ];
   sheet.getRange(1, 1, rows.length, 2).setValues(rows);
   sheet.getRange('A1:B1').merge().setFontWeight('bold').setFontSize(16).setBackground('#174f3f').setFontColor('#ffffff');
-  sheet.getRange('A2:A6').setFontWeight('bold');
-  sheet.getRange('A4:B6').setBackground('#eef5f1');
+  sheet.getRange('A2:A7').setFontWeight('bold');
+  sheet.getRange('A5:B7').setBackground('#eef5f1');
   sheet.setColumnWidth(1, 180); sheet.setColumnWidth(2, 460); sheet.setFrozenRows(1);
 }

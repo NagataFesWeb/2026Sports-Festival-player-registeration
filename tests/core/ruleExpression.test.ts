@@ -8,7 +8,7 @@ import {
 
 const values = (overrides: Partial<RuleExpressionValues> = {}): RuleExpressionValues => ({
   M: 2, F: 2, N: 4, UNKNOWN: 0, EMPTY: 0, REQUIRED_EMPTY: 0,
-  UNIQUE: 4, DUPLICATE: 0, MAX_PER_STUDENT: 1, INVALID_ID: 0,
+  UNIQUE: 4, DUPLICATE: 0, MAX_PER_STUDENT: 1, MAX_PER_EVENT: 1, INVALID_ID: 0,
   NAME_MISMATCH: 0, CLASS_MISMATCH: 0, PENDING: 0,
   ...overrides,
 });

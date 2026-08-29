@@ -14,6 +14,7 @@ export interface AthleteIndexRow {
   classNumber: number;
   studentId: string;
   studentName: string;
+  gender: RosterGender;
   eventSummary: string;
 }
 
@@ -21,6 +22,17 @@ export interface ConcurrentRosterAthlete {
   registrationId: string;
   studentId: string;
   studentName: string;
+  gender: RosterGender;
+}
+
+export type RosterGender = NonNullable<Student['gender']>;
+
+/**
+ * 名簿へ印刷する性別の表記。承認画面とルール論理式の`UNKNOWN`にそろえ、
+ * 生徒マスターで確認できない場合は`UNKNOWN`と表示する。
+ */
+export function rosterGenderLabel(gender: RosterGender | undefined): string {
+  return gender === 'M' ? '男' : gender === 'F' ? '女' : 'UNKNOWN';
 }
 
 export interface ConcurrentRosterRow {
@@ -38,6 +50,59 @@ export interface ConcurrentRosterTable {
 export type RosterJobStep = { kind: 'REPORT'; reportIndex: number } | { kind: 'FINALIZE' };
 
 export const ROSTER_REPORT_NAMES = ['種目別', 'クラス別・招集順', '当日変更用', 'クラス配布用PDF'] as const;
+
+/** 表示順を何区切りで1ページにまとめるか。 */
+export const ROSTER_PAGE_BLOCK_SIZE = 100;
+
+export interface EventRosterPage {
+  /** 表示順を100で割った商。ページの並び順でもある。 */
+  blockKey: number;
+  events: EventSetting[];
+}
+
+/**
+ * 表示順を100で割った商。名簿のページ分けと、修正フォームのセクション分けで同じ値を使う。
+ * 片方だけ区切りが変わると帳票とフォームの並びがずれるため、必ずこの関数を通す。
+ */
+export function displayOrderBlockKey(displayOrder: number): number {
+  const value = Number.isFinite(displayOrder) ? displayOrder : 0;
+  return Math.floor(value / ROSTER_PAGE_BLOCK_SIZE);
+}
+
+/**
+ * 種目別・当日変更用の名簿を、表示順の100区切りでページへ分ける。
+ *
+ * 表示順0・100・200はそれぞれ別のページになり、300・301・302は同じページへまとまる。
+ * 学年別に競技を分けている場合（1年男子100m=301、2年男子100m=302 など）に、
+ * 1枚へまとめて印刷できるようにするための区切り。
+ * 同じページの中では、表示順、次に招集順で並べる。
+ */
+export function buildEventRosterPages(events: EventSetting[]): EventRosterPage[] {
+  const sorted = [...events].sort((left, right) =>
+    left.displayOrder - right.displayOrder || left.assemblyOrder - right.assemblyOrder);
+  const pages: EventRosterPage[] = [];
+  sorted.forEach((event) => {
+    const blockKey = displayOrderBlockKey(event.displayOrder);
+    const last = pages[pages.length - 1];
+    if (last && last.blockKey === blockKey) {
+      last.events.push(event);
+      return;
+    }
+    pages.push({ blockKey, events: [event] });
+  });
+  return pages;
+}
+
+/**
+ * ページの見出し。1競技だけならその競技名、複数なら競技名を並べる。
+ * 長くなりすぎる場合は先頭の競技名と残りの件数にする（シート名の上限があるため）。
+ */
+export function eventRosterPageTitle(page: EventRosterPage, maxLength = 40): string {
+  const names = page.events.map((event) => event.eventName);
+  if (names.length === 1) return names[0] ?? '';
+  const joined = names.join('・');
+  return joined.length <= maxLength ? joined : `${names[0] ?? ''}ほか${names.length - 1}件`;
+}
 
 export interface ClassDistributionPage {
   grade: number;
@@ -148,6 +213,7 @@ export function buildConcurrentRosterTables(
               registrationId: registration.registrationId,
               studentId: registration.studentId,
               studentName: registration.studentNameSnapshot,
+              gender: registration.genderSnapshot ?? 'U',
             });
             athletesByClass[registration.classNumber] = athletes;
           });
@@ -185,7 +251,7 @@ export function buildAthleteIndex(registrations: Registration[]): AthleteIndexRo
         .join('\n');
       return {
         grade: first.grade, classNumber: first.classNumber, studentId: first.studentId,
-        studentName: first.studentNameSnapshot, eventSummary,
+        studentName: first.studentNameSnapshot, gender: first.genderSnapshot ?? 'U', eventSummary,
       };
     })
     .sort((left, right) => left.grade - right.grade || left.classNumber - right.classNumber
@@ -227,6 +293,9 @@ const registrationKey = (grade: number, classNumber: number, eventId: string, sl
   `${grade}:${classNumber}:${eventId}:${slotId}`;
 
 const safeIdPart = (value: string): string => encodeURIComponent(value).replace(/%/g, '_');
+
+/** 生徒マスターに未登録の学籍番号を名簿へ出すときの氏名表記。 */
+export const UNLISTED_STUDENT_NAME = '（名簿未登録）';
 
 export function buildRegistrationSnapshot(input: RegistrationSnapshotInput): Registration[] {
   const students = new Map(input.students.map((student) => [student.studentId, student]));
@@ -271,7 +340,11 @@ export function buildRegistrationSnapshot(input: RegistrationSnapshotInput): Reg
             slotId: item.slotId,
             slotName: item.slotName,
             studentId: item.normalizedStudentId,
-            studentNameSnapshot: student?.name ?? item.normalizedName ?? item.studentNameInput,
+            // 生徒マスターに未登録の学籍番号は警告どまりで名簿まで届く。氏名欄を空白にすると
+            // 印刷物で記入漏れと見分けが付かないため、未登録であることを明示する。
+            studentNameSnapshot: (student?.name ?? item.normalizedName ?? item.studentNameInput)
+              || UNLISTED_STUDENT_NAME,
+            genderSnapshot: student?.gender ?? 'U',
             grade: submission.targetGrade,
             classNumber: submission.targetClass,
             version: input.versionName,

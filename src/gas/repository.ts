@@ -32,6 +32,17 @@ import {
   type ProductionStudentInputRow,
 } from '../core/student-master';
 import { normalizeStudentId } from '../core/normalization';
+import {
+  MOCK_ROSTER_SOURCE_CHOICES,
+  MOCK_ROSTER_SOURCE_LABELS,
+  detectRosterSourceConflict,
+  firstRosterToRead,
+  parseMockRosterSource,
+  rosterFallbackAllowed,
+  rosterSourceConflictMessage,
+  type MockRosterSource,
+} from '../core/mock-roster-source';
+import { getSystemMode } from './mode-probe';
 
 type SheetValue = string | number | boolean | Date;
 type Header = readonly string[];
@@ -131,6 +142,19 @@ export function openProductionStudentSheet(): void {
   sheet.activate();
 }
 
+/** `疑似データ設定`シートの1行分。`band`は背景色と入力規則をまとめて当てるための区分。 */
+interface MockDataSettingRow {
+  key: string;
+  value: SheetValue;
+  note: string;
+  band: 'grade' | 'class' | 'formType' | 'count' | 'roster' | 'stamp';
+}
+
+const MOCK_DATA_BAND_BACKGROUNDS: Record<MockDataSettingRow['band'], string> = {
+  grade: '#dcfce7', class: '#e0f2fe', formType: '#ede9fe',
+  count: '#fef3c7', roster: '#fce7f3', stamp: '#eceff1',
+};
+
 export function ensureMockDataSettings(students: Student[]): void {
   const sheet = ensureSheet(SHEETS.mockDataSettings, MOCK_DATA_SETTING_HEADERS);
   const oldRows = sheet.getLastRow() < 2
@@ -156,24 +180,59 @@ export function ensureMockDataSettings(students: Student[]): void {
   const defaultWarning = oldValues.has(MOCK_DATA_SETTING_KEYS.warningSubmissionCount) ? oldWarning : 20;
   const errorCount = Math.min(defaultError, submissionCount);
   const warningCount = Math.min(defaultWarning, Math.max(0, submissionCount - errorCount));
-  const rows: SheetValue[][] = [
-    ...[1, 2, 3].map((grade) => [
-      `${MOCK_DATA_SETTING_KEYS.targetGradePrefix}${grade}年`, targetGrades.includes(grade),
-      `チェックすると${grade}年を作成対象にします。`,
-    ]),
-    ...[1, 2, 3, 4, 5, 6, 7, 8].map((classNumber) => [
-      `${MOCK_DATA_SETTING_KEYS.targetClassPrefix}${classNumber}組`, targetClasses.includes(classNumber),
-      `チェックすると、選んだ学年の${classNumber}組を作成対象にします。`,
-    ]),
-    [MOCK_DATA_SETTING_KEYS.normalFormEnabled, normalFormEnabled,
-      'チェックすると、選んだ各クラスにつき通常フォームの疑似回答を1件だけ作ります。'],
-    [MOCK_DATA_SETTING_KEYS.correctionFormEnabled, correctionFormEnabled,
-      'チェックすると、通常回答の後に、競技全体を直す修正フォームの疑似回答を追加します。'],
-    [MOCK_DATA_SETTING_KEYS.errorSubmissionCount, errorCount,
-      'この件数の申請に、存在しない番号または別クラスの番号を入れます。'],
-    [MOCK_DATA_SETTING_KEYS.warningSubmissionCount, warningCount,
-      'この件数の申請に、氏名差異・代理入力・受付停止のいずれかを入れます。'],
+  // 旧版のブックには名簿行が無い。そのときだけ、それまでの挙動（生徒マスターに入力があれば
+  // そちらを優先）と同じ結果になる初期値を書き込む。以後はこの行の値が正になる。
+  const rosterSource: MockRosterSource = oldValues.has(MOCK_DATA_SETTING_KEYS.rosterSource)
+    ? parseMockRosterSource(text(oldValues.get(MOCK_DATA_SETTING_KEYS.rosterSource)))
+    : (isProductionStudentMasterActive() ? 'PRODUCTION_STUDENTS' : 'MOCK_STUDENTS');
+  const rosterStamp = text(oldValues.get(MOCK_DATA_SETTING_KEYS.rosterSourceStamp));
+
+  const settingRows: MockDataSettingRow[] = [
+    ...[1, 2, 3].map((grade): MockDataSettingRow => ({
+      key: `${MOCK_DATA_SETTING_KEYS.targetGradePrefix}${grade}年`,
+      value: targetGrades.includes(grade), band: 'grade',
+      note: `チェックすると${grade}年を作成対象にします。`,
+    })),
+    ...[1, 2, 3, 4, 5, 6, 7, 8].map((classNumber): MockDataSettingRow => ({
+      key: `${MOCK_DATA_SETTING_KEYS.targetClassPrefix}${classNumber}組`,
+      value: targetClasses.includes(classNumber), band: 'class',
+      note: `チェックすると、選んだ学年の${classNumber}組を作成対象にします。`,
+    })),
+    {
+      key: MOCK_DATA_SETTING_KEYS.normalFormEnabled, value: normalFormEnabled, band: 'formType',
+      note: 'チェックすると、選んだ各クラスにつき通常フォームの疑似回答を1件だけ作ります。',
+    },
+    {
+      key: MOCK_DATA_SETTING_KEYS.correctionFormEnabled, value: correctionFormEnabled, band: 'formType',
+      note: 'チェックすると、通常回答の後に、競技全体を直す修正フォームの疑似回答を追加します。',
+    },
+    {
+      key: MOCK_DATA_SETTING_KEYS.errorSubmissionCount, value: errorCount, band: 'count',
+      note: 'この件数の申請に、存在しない番号または別クラスの番号を入れます。',
+    },
+    {
+      key: MOCK_DATA_SETTING_KEYS.warningSubmissionCount, value: warningCount, band: 'count',
+      note: 'この件数の申請に、代理入力・受付停止のいずれかを入れます。',
+    },
+    {
+      key: MOCK_DATA_SETTING_KEYS.rosterSource, value: MOCK_ROSTER_SOURCE_LABELS[rosterSource], band: 'roster',
+      note: '疑似申請の選手をどちらの名簿から選ぶかを決めます。'
+        + `「${MOCK_ROSTER_SOURCE_LABELS.MOCK_STUDENTS}」は実在しない生徒だけを使います。`
+        + `「${MOCK_ROSTER_SOURCE_LABELS.PRODUCTION_STUDENTS}」は実在の生徒を使うので、実際のクラス人数のまま試せます。`,
+    },
+    {
+      key: MOCK_DATA_SETTING_KEYS.rosterSourceStamp, value: rosterStamp, band: 'stamp',
+      note: '疑似データを作ったときの名簿を自動で記録します。この行は編集しないでください。',
+    },
   ];
+
+  const rowNumberOf = (key: string): number =>
+    settingRows.findIndex((row) => row.key === key) + 2;
+  const bandRange = (band: MockDataSettingRow['band']): { start: number; count: number } => {
+    const first = settingRows.findIndex((row) => row.band === band);
+    return { start: first + 2, count: settingRows.filter((row) => row.band === band).length };
+  };
+
   const oldDataRows = Math.max(0, sheet.getLastRow() - 1);
   // 入力規則だけが値のない行にも残るため、B列の全データ行を先に解除する。
   // flushしないと、同一実行内のsetValuesが旧規則で判定される場合がある。
@@ -181,26 +240,97 @@ export function ensureMockDataSettings(students: Student[]): void {
   sheet.getRange(2, 2, validationRows, 1).clearDataValidations();
   SpreadsheetApp.flush();
   if (oldDataRows > 0) {
-    const oldRange = sheet.getRange(2, 1, oldDataRows, MOCK_DATA_SETTING_HEADERS.length);
-    oldRange.clearContent();
+    sheet.getRange(2, 1, oldDataRows, MOCK_DATA_SETTING_HEADERS.length).clearContent();
   }
-  sheet.getRange(2, 1, rows.length, MOCK_DATA_SETTING_HEADERS.length).setValues(rows);
-  sheet.getRange(2, 2, 13, 1).setDataValidation(
+  sheet.getRange(2, 1, settingRows.length, MOCK_DATA_SETTING_HEADERS.length)
+    .setValues(settingRows.map((row) => [row.key, row.value, row.note]));
+
+  const checkboxBands = (['grade', 'class', 'formType'] as const).map(bandRange);
+  const checkboxStart = Math.min(...checkboxBands.map((band) => band.start));
+  const checkboxCount = checkboxBands.reduce((total, band) => total + band.count, 0);
+  sheet.getRange(checkboxStart, 2, checkboxCount, 1).setDataValidation(
     SpreadsheetApp.newDataValidation().requireCheckbox().setAllowInvalid(false).build(),
   );
-  sheet.getRange(15, 2, 2, 1).setDataValidation(
+  const countBand = bandRange('count');
+  sheet.getRange(countBand.start, 2, countBand.count, 1).setDataValidation(
     SpreadsheetApp.newDataValidation().requireNumberBetween(0, 5000).setAllowInvalid(false).build(),
   ).setNumberFormat('0');
+  sheet.getRange(rowNumberOf(MOCK_DATA_SETTING_KEYS.rosterSource), 2, 1, 1).setDataValidation(
+    SpreadsheetApp.newDataValidation()
+      .requireValueInList([...MOCK_ROSTER_SOURCE_CHOICES], true).setAllowInvalid(false).build(),
+  );
+
   sheet.setColumnWidth(1, 210);
-  sheet.setColumnWidth(2, 120);
+  sheet.setColumnWidth(2, 160);
   sheet.setColumnWidth(3, 560);
   sheet.getRange(1, 1, 1, MOCK_DATA_SETTING_HEADERS.length).setFontWeight('bold').setBackground('#dbeafe');
-  sheet.getRange('A2:C4').setBackground('#dcfce7');
-  sheet.getRange('A5:C12').setBackground('#e0f2fe');
-  sheet.getRange('A13:C14').setBackground('#ede9fe');
-  sheet.getRange('A15:C16').setBackground('#fef3c7');
-  sheet.getRange('B2:B14').setHorizontalAlignment('center');
-  sheet.getRange('B15').setNote('実際に作成する申請数を超えた場合は、自動的に申請数以下へ調整します。');
+  (Object.keys(MOCK_DATA_BAND_BACKGROUNDS) as MockDataSettingRow['band'][]).forEach((band) => {
+    const range = bandRange(band);
+    if (range.count === 0) return;
+    sheet.getRange(range.start, 1, range.count, MOCK_DATA_SETTING_HEADERS.length)
+      .setBackground(MOCK_DATA_BAND_BACKGROUNDS[band]);
+  });
+  sheet.getRange(checkboxStart, 2, checkboxCount, 1).setHorizontalAlignment('center');
+  sheet.getRange(countBand.start, 2, 1, 1)
+    .setNote('実際に作成する申請数を超えた場合は、自動的に申請数以下へ調整します。');
+  sheet.getRange(rowNumberOf(MOCK_DATA_SETTING_KEYS.rosterSourceStamp), 2, 1, 1)
+    .setNote('自動で記録します。編集しないでください。');
+}
+
+/** `疑似データ設定`シートの1行だけを読む。`ensureMockDataSettings`は呼ばない。 */
+function mockDataSettingValue(key: string): string {
+  const sheet = spreadsheet().getSheetByName(SHEETS.mockDataSettings);
+  if (!sheet || sheet.getLastRow() < 2) return '';
+  return sheet.getRange(2, 1, sheet.getLastRow() - 1, 2).getDisplayValues()
+    .find((row) => (row[0] ?? '') === key)?.[1] ?? '';
+}
+
+function writeMockDataSettingValue(key: string, value: string): void {
+  const sheet = spreadsheet().getSheetByName(SHEETS.mockDataSettings);
+  if (!sheet || sheet.getLastRow() < 2) return;
+  const keys = sheet.getRange(2, 1, sheet.getLastRow() - 1, 1).getDisplayValues();
+  const offset = keys.findIndex((row) => (row[0] ?? '') === key);
+  if (offset < 0) return;
+  sheet.getRange(offset + 2, 2, 1, 1).setValue(value);
+}
+
+/** 利用者が選んだ名簿。シートも行も無いときは疑似生徒マスター。 */
+export function readMockRosterSourceSetting(): MockRosterSource {
+  return parseMockRosterSource(mockDataSettingValue(MOCK_DATA_SETTING_KEYS.rosterSource));
+}
+
+/** 疑似申請を作ったときの名簿。未記録なら空文字。 */
+export function readMockRosterSourceStamp(): MockRosterSource | '' {
+  const raw = mockDataSettingValue(MOCK_DATA_SETTING_KEYS.rosterSourceStamp).trim();
+  return raw === '' ? '' : parseMockRosterSource(raw);
+}
+
+export function writeMockRosterSourceStamp(source: MockRosterSource | ''): void {
+  writeMockDataSettingValue(
+    MOCK_DATA_SETTING_KEYS.rosterSourceStamp,
+    source === '' ? '' : MOCK_ROSTER_SOURCE_LABELS[source],
+  );
+}
+
+/**
+ * 疑似申請が残ったまま名簿の選択が変わっていないかを確かめる。
+ *
+ * 疑似生徒マスターと生徒マスターは学籍番号の書式が同じなので、選択を変えると既存の疑似申請が
+ * 別の生徒へ解決され直す。承認して`登録データ`や帳票へ流れると取り返しがつかないため、
+ * 再検査・承認・名簿作成の入口で必ず止める。
+ */
+export function assertMockRosterSourceConsistent(submissions: Submission[]): void {
+  const stamped = readMockRosterSourceStamp();
+  if (stamped === '') return;
+  const conflict = detectRosterSourceConflict({
+    resolved: activeRosterSource(),
+    stamped,
+    mockSubmissionExists: submissions.some((submission) =>
+      isDevelopmentMockSubmissionId(submission.submissionId)),
+  });
+  if (conflict === 'MOCK_ROSTER_SOURCE_CHANGED') {
+    throw new Error(rosterSourceConflictMessage(stamped));
+  }
 }
 
 export function readMockDataSettings(students: Student[]): MockDataGenerationConfig {
@@ -242,12 +372,19 @@ export function readMockDataSettings(students: Student[]): MockDataGenerationCon
   return config;
 }
 
+/** 旧版の`登録データ`には性別列が無いため、読めない値はUNKNOWN扱いの`U`にそろえる。 */
+function normalizeSnapshotGender(value: SheetValue | undefined): NonNullable<Student['gender']> {
+  const normalized = text(value).toUpperCase();
+  return normalized === 'M' || normalized === 'F' ? normalized : 'U';
+}
+
 export function replaceRegistrations(registrations: Registration[]): void {
   replaceRows(SHEETS.registrations, REGISTRATION_HEADERS, registrations.map((registration) => [
     registration.registrationId, registration.sourceSubmissionId, registration.eventId,
     registration.eventName, registration.slotId, registration.slotName, registration.studentId,
     registration.studentNameSnapshot, registration.grade, registration.classNumber,
     registration.version, registration.updatedAt, registration.updatedBy,
+    registration.genderSnapshot ?? 'U',
   ]));
 }
 
@@ -259,6 +396,7 @@ export function readRegistrations(): Registration[] {
     classNumber: numberValue(row[9]), version: text(row[10]),
     updatedAt: row[11] instanceof Date ? row[11].toISOString() : text(row[11]),
     updatedBy: text(row[12]),
+    genderSnapshot: normalizeSnapshotGender(row[13]),
   }));
 }
 
@@ -344,6 +482,41 @@ export function deleteDevelopmentMockSubmissionRows(): void {
   removeRowsWhere(requireSheet(SHEETS.approvals), 2, isDevelopmentMockSubmissionId);
   removeRowsWhere(requireSheet(SHEETS.changeHistory), 2, isDevelopmentMockSubmissionId);
   removeRowsWhere(requireSheet(SHEETS.submissions), 1, isDevelopmentMockSubmissionId);
+  // 疑似申請が無くなったので、どの名簿で作ったかの記録も消す。残すと次回の食い違い検出が誤作動する。
+  writeMockRosterSourceStamp('');
+}
+
+/** ヘッダー行を残して、指定シートのデータ行だけを消す。存在しないシートは無視する。 */
+export function clearSheetDataRows(sheetName: string): number {
+  const sheet = spreadsheet().getSheetByName(sheetName);
+  if (!sheet) return 0;
+  const rows = dataRowCount(sheet);
+  if (rows === 0) return 0;
+  sheet.getRange(2, 1, rows, Math.max(1, sheet.getLastColumn())).clearContent();
+  return rows;
+}
+
+export function countSheetDataRows(sheetName: string): number {
+  const sheet = spreadsheet().getSheetByName(sheetName);
+  return sheet ? dataRowCount(sheet) : 0;
+}
+
+/** 名簿作成の一時シートなど、名前で判定できる残骸シートを削除する。 */
+export function deleteSheetsWhere(predicate: (name: string) => boolean): number {
+  const book = spreadsheet();
+  const targets = book.getSheets().filter((sheet) => predicate(sheet.getName()));
+  targets.forEach((sheet) => book.deleteSheet(sheet));
+  return targets.length;
+}
+
+export function readRosterHistory(): RosterHistoryRecord[] {
+  return readRows(SHEETS.rosterHistory, ROSTER_HISTORY_HEADERS).map((row) => ({
+    rosterVersionId: text(row[0]), inputName: text(row[1]), versionName: text(row[2]),
+    folderId: text(row[3]), folderUrl: text(row[4]),
+    registrationCount: numberValue(row[5]), sourceSubmissionCount: numberValue(row[6]),
+    createdBy: text(row[7]),
+    createdAt: row[8] instanceof Date ? row[8].toISOString() : text(row[8]),
+  }));
 }
 
 export interface RawFormResponseRecord {
@@ -393,6 +566,23 @@ export function appendRawFormResponse(record: RawFormResponseRecord): number {
 export function updateRawFormResponse(row: number, record: RawFormResponseRecord): void {
   requireSheet(SHEETS.rawFormResponses).getRange(row, 1, 1, RAW_FORM_RESPONSE_HEADERS.length)
     .setValues([rawResponseToRow(record)]);
+}
+
+/** 実機テストの後片付け用。指定した回答IDの原本行だけを削除する。 */
+export function removeRawFormResponses(responseIds: string[]): number {
+  const targets = new Set(responseIds.filter((value) => value !== ''));
+  if (targets.size === 0) return 0;
+  const sheet = requireSheet(SHEETS.rawFormResponses);
+  if (sheet.getLastRow() < 2) return 0;
+  const values = sheet.getRange(2, 2, sheet.getLastRow() - 1, 1).getDisplayValues();
+  let removed = 0;
+  for (let index = values.length - 1; index >= 0; index -= 1) {
+    if (targets.has(values[index]?.[0] ?? '')) {
+      sheet.deleteRow(index + 2);
+      removed += 1;
+    }
+  }
+  return removed;
 }
 
 export function replaceRawFormResponses(records: RawFormResponseRecord[]): void {
@@ -448,17 +638,38 @@ export function replaceStudents(students: Student[]): void {
   ]));
 }
 
+/** 本番用の`生徒マスター`だけを読む。名簿の選択を一切見ない。 */
+export function readProductionStudents(): Student[] {
+  return buildProductionStudents(readProductionStudentInputRows());
+}
+
+/**
+ * 検査・確認画面・名簿作成が使う唯一の名簿。
+ *
+ * `疑似データ設定`の`疑似申請に使う名簿`で選んだ側を返す。2つの名簿は学籍番号の書式が
+ * 同じなので、混ぜずに必ずどちらか一方だけを返す。
+ * 先に1枚読み、空だったときだけもう一方を読む（読み取り回数を最悪2回に抑えるため）。
+ */
 export function readStudents(): Student[] {
-  const productionRows = readProductionStudentInputRows();
-  if (productionRows.length > 0) return buildProductionStudents(productionRows);
-  return readRows(SHEETS.students, STUDENT_HEADERS).map((row) => ({
-    studentId: text(row[0]),
-    grade: numberValue(row[1]),
-    classNumber: numberValue(row[2]),
-    attendanceNumber: numberValue(row[3]),
-    name: text(row[4]),
-    gender: (['M', 'F'].includes(text(row[5]).toUpperCase()) ? text(row[5]).toUpperCase() : 'U') as NonNullable<Student['gender']>,
-  }));
+  const mode = getSystemMode();
+  const first = firstRosterToRead({ mode, configured: readMockRosterSourceSetting() });
+  const readOne = (source: MockRosterSource): Student[] =>
+    source === 'PRODUCTION_STUDENTS' ? readProductionStudents() : readMockStudents();
+  const primary = readOne(first);
+  if (primary.length > 0 || !rosterFallbackAllowed(mode)) return primary;
+  return readOne(first === 'MOCK_STUDENTS' ? 'PRODUCTION_STUDENTS' : 'MOCK_STUDENTS');
+}
+
+/** いま実際に使われている名簿。表示文言と食い違い検出のために使う。 */
+export function activeRosterSource(): MockRosterSource {
+  const mode = getSystemMode();
+  const first = firstRosterToRead({ mode, configured: readMockRosterSourceSetting() });
+  if (!rosterFallbackAllowed(mode)) return first;
+  const primaryCount = first === 'PRODUCTION_STUDENTS'
+    ? readProductionStudentInputRows().length
+    : readMockStudents().length;
+  if (primaryCount > 0) return first;
+  return first === 'MOCK_STUDENTS' ? 'PRODUCTION_STUDENTS' : 'MOCK_STUDENTS';
 }
 
 export function readMockStudents(): Student[] {

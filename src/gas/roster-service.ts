@@ -1,14 +1,17 @@
 import {
-  buildAthleteIndex, buildClassDistributionPages, buildConcurrentRosterTables,
+  buildAthleteIndex, buildClassDistributionPages, buildConcurrentRosterTables, rosterGenderLabel,
+  type RosterGender,
   buildRegistrationSnapshot, buildRosterDistributionPreflight,
   assertRosterJobCanStart, normalizeRosterInputName, planRosterJobStep, ROSTER_REPORT_NAMES,
   selectRosterVersionName,
+  buildEventRosterPages, eventRosterPageTitle, type EventRosterPage,
 } from '../core/roster';
 import { validateSubmission } from '../core/validation';
 import { REGISTRATION_HEADERS, SCRIPT_PROPERTIES, SHEETS } from '../shared/constants';
 import type { EventSetting, Registration, Student } from '../shared/types';
 import {
   appendRosterHistory,
+  assertMockRosterSourceConsistent,
   ensureApplicationSheets,
   readItems,
   readStudents,
@@ -25,6 +28,12 @@ const ROSTER_FOLDER_NAME = '選手名簿';
 const ROSTER_JOB_PROPERTY = SCRIPT_PROPERTIES.playerRosterJob;
 const ROSTER_STATUS_SHEET = '名簿作成状況';
 const ROSTER_TRIGGER_HANDLER = 'continuePlayerRosterCreation';
+/**
+ * 名簿ファイルの構成とページの分け方の版。
+ * 途中で中断した名簿作成が、古い体裁のまま再開されるのを防ぐために比べる。
+ * 5: 種目別・当日変更用を表示順の100区切りでページ分けするようにした。
+ */
+const ROSTER_REPORT_PLAN_VERSION = 5;
 const REPORTS = ROSTER_REPORT_NAMES;
 const PRINT_COLORS = {
   title: '#17324d', titleText: '#ffffff', accent: '#f2c94c', header: '#dbe7f0',
@@ -187,10 +196,11 @@ function writeAthleteIndex(
   createdAt: string,
 ): void {
   sheet.setName('自分の競技を探す');
-  const headers = ['学年', '組', '学籍番号', '選手氏名', '出場競技・走順'];
+  const headers = ['学年', '組', '学籍番号', '選手氏名', '性別', '出場競技・走順'];
   const indexRows = buildAthleteIndex(registrations);
   const rows = indexRows.map((row) => [
-    `${row.grade}年`, `${row.classNumber}組`, row.studentId, row.studentName, row.eventSummary,
+    `${row.grade}年`, `${row.classNumber}組`, row.studentId, row.studentName,
+    rosterGenderLabel(row.gender), row.eventSummary,
   ]);
   const metadata = `版：${versionName} / 作成：${Utilities.formatDate(new Date(createdAt), 'Asia/Tokyo', 'yyyy/MM/dd HH:mm')} / 選手：${rows.length}人`;
   decorateTitle(
@@ -211,11 +221,13 @@ function writeAthleteIndex(
   sheet.setColumnWidth(2, 65);
   sheet.setColumnWidth(3, 100);
   sheet.setColumnWidth(4, 180);
-  sheet.setColumnWidth(5, 360);
+  sheet.setColumnWidth(5, 70);
+  sheet.setColumnWidth(6, 360);
   if (rows.length > 0) {
     sheet.getRange(6, 3, rows.length, 1).setNumberFormat('@').setHorizontalAlignment('center');
     sheet.getRange(6, 4, rows.length, 1).setFontWeight('bold');
-    sheet.getRange(6, 5, rows.length, 1).setWrap(true);
+    sheet.getRange(6, 5, rows.length, 1).setHorizontalAlignment('center');
+    sheet.getRange(6, 6, rows.length, 1).setWrap(true);
     // autoResizeRowsは大規模名簿で非常に遅いため、索引全体を一括設定する。
     sheet.setRowHeights(6, rows.length, 58);
   }
@@ -238,14 +250,21 @@ function classesForGrade(students: Student[], registrations: Registration[], gra
   return values.size > 0 ? [...values].sort((left, right) => left - right) : [1, 2, 3, 4, 5, 6, 7, 8];
 }
 
+function normalizeStagingGender(value: unknown): RosterGender {
+  const normalized = String(value ?? '').trim().toUpperCase();
+  return normalized === 'M' || normalized === 'F' ? normalized : 'U';
+}
+
 function athleteCell(
-  athletes: Array<{ studentId: string; studentName: string }>, report: RosterLayout,
+  athletes: Array<{ studentId: string; studentName: string; gender?: RosterGender }>,
+  report: RosterLayout,
 ): string {
   if (report === '当日変更用' && athletes.length === 0) {
     return '変更後：____________\n理由：____________';
   }
   return athletes.map((athlete) => {
-    const base = `${athlete.studentName}\n（${athlete.studentId}）`;
+    // 学籍番号と氏名の並びは修正枠の黄色付けが目印にしているため崩さず、性別だけを添える。
+    const base = `${athlete.studentName}\n（${athlete.studentId}・${rosterGenderLabel(athlete.gender)}）`;
     return report === '当日変更用'
       ? `${base}\n変更後：____________\n理由：____________`
       : base;
@@ -294,7 +313,7 @@ function writeGradeRosterSheet(
 ): void {
   sheet.setName(sheetName);
   const classNumbers = classesForGrade(students, registrations, grade);
-  const columnCount = report === 'クラス別' ? 4 : report === '当日変更用' ? 7
+  const columnCount = report === 'クラス別' ? 5 : report === '当日変更用' ? 7
     : report === '招集順' ? classNumbers.length + 4 : classNumbers.length + 1;
   const gradeRegistrations = registrations.filter((registration) => registration.grade === grade);
   const tables = buildConcurrentRosterTables(registrations, grade, events);
@@ -310,9 +329,9 @@ function writeGradeRosterSheet(
   let row = 5;
   if (report === 'クラス別' || report === '当日変更用') {
     const headers = report === 'クラス別'
-      ? ['競技名', '走順・役割', '学籍番号', '選手氏名']
+      ? ['競技名', '走順・役割', '学籍番号', '選手氏名', '性別']
       : ['競技名', '走順・役割', '現在の選手', '変更後の学籍番号', '変更後の氏名', '変更理由', '確認者'];
-    const widths = report === 'クラス別' ? [190, 120, 110, 190] : [175, 115, 210, 125, 170, 180, 110];
+    const widths = report === 'クラス別' ? [190, 120, 110, 190, 70] : [175, 115, 210, 125, 170, 180, 110];
     widths.forEach((width, index) => sheet.setColumnWidth(index + 1, width));
     classNumbers.forEach((classNumber, classIndex) => {
       sectionTitle(sheet, row, columnCount, `${grade}年${classNumber}組`, classIndex % 2 === 1);
@@ -323,9 +342,10 @@ function writeGradeRosterSheet(
       tables.forEach((table) => table.rows.forEach((slot) => {
         const athletes = slot.athletesByClass[classNumber] ?? [];
         if (report === 'クラス別') {
-          if (athletes.length === 0) values.push([table.eventName, slot.slotName, '', '']);
+          if (athletes.length === 0) values.push([table.eventName, slot.slotName, '', '', '']);
           else athletes.forEach((athlete) => values.push([
             table.eventName, slot.slotName, athlete.studentId, athlete.studentName,
+            rosterGenderLabel(athlete.gender),
           ]));
         } else {
           values.push([
@@ -420,28 +440,43 @@ function uniqueSheetName(
   return `${candidate.slice(0, 96)}_${index}`;
 }
 
+function gradesForEvent(event: EventSetting): (1 | 2 | 3)[] {
+  return ([1, 2, 3] as const).filter((grade) =>
+    event.targetGrade === '全学年' || event.targetGrade === `${grade}年`);
+}
+
+/**
+ * 1ページ分の種目別名簿を書く。
+ *
+ * 表示順の100区切りが同じ競技は同じページへまとめる（`buildEventRosterPages`）。
+ * 学年ごとに競技を分けている場合に、1枚へまとめて印刷できるようにするため。
+ */
 function writeEventRosterSheet(
   sheet: GoogleAppsScript.Spreadsheet.Sheet,
-  event: EventSetting,
+  page: EventRosterPage,
   versionName: string,
   registrations: Registration[],
   students: Student[],
   createdAt: string,
   report: '種目別' | '当日変更用',
 ): void {
-  const grades = ([1, 2, 3] as const).filter((grade) =>
-    event.targetGrade === '全学年' || event.targetGrade === `${grade}年`);
-  const classNumbers = [...new Set(grades.flatMap((grade) =>
+  const pageGrades = [...new Set(page.events.flatMap(gradesForEvent))].sort((left, right) => left - right);
+  const classNumbers = [...new Set(pageGrades.flatMap((grade) =>
     classesForGrade(students, registrations, grade)))].sort((left, right) => left - right);
   const columnCount = Math.max(2, classNumbers.length + 1);
-  const eventRegistrations = registrations.filter((registration) => registration.eventId === event.eventId);
+  const eventIds = new Set(page.events.map((event) => event.eventId));
+  const pageRegistrations = registrations.filter((registration) => eventIds.has(registration.eventId));
+  const multipleEvents = page.events.length > 1;
+  const pageTitle = eventRosterPageTitle(page);
   decorateTitle(
     sheet,
-    `${event.eventName} ${report}選手名簿`,
+    `${pageTitle} ${report}選手名簿`,
     report === '当日変更用'
       ? '種目別名簿と同じ配置です。縦が走順・役割、横がクラスです。変更する選手の欄へ記入してください。'
-      : '同じ種目の1年、2年、3年の表を上から順に並べています。縦が走順・役割、横がクラスです。',
-    `版：${versionName} / 作成：${Utilities.formatDate(new Date(createdAt), 'Asia/Tokyo', 'yyyy/MM/dd HH:mm')} / 登録：${eventRegistrations.length}件`,
+      : multipleEvents
+        ? `表示順が同じ100番台の${page.events.length}競技を1ページにまとめています。縦が走順・役割、横がクラスです。`
+        : '同じ種目の1年、2年、3年の表を上から順に並べています。縦が走順・役割、横がクラスです。',
+    `版：${versionName} / 作成：${Utilities.formatDate(new Date(createdAt), 'Asia/Tokyo', 'yyyy/MM/dd HH:mm')} / 登録：${pageRegistrations.length}件`,
     columnCount,
   );
   sheet.setFrozenRows(3);
@@ -449,30 +484,40 @@ function writeEventRosterSheet(
   classNumbers.forEach((_, index) => sheet.setColumnWidth(index + 2, 175));
 
   let row = 5;
-  grades.forEach((grade, gradeIndex) => {
-    const table = buildConcurrentRosterTables(registrations, grade, [event])[0];
-    sectionTitle(sheet, row, columnCount, `${grade}年`, gradeIndex % 2 === 1);
-    row += 1;
-    const headers = ['走順・役割', ...classNumbers.map((classNumber) => `${classNumber}組`)];
-    tableHeader(sheet, row, headers);
-    row += 1;
-    const values = (table?.rows ?? []).map((slot) => [
-      slot.slotName,
-      ...classNumbers.map((classNumber) => athleteCell(slot.athletesByClass[classNumber] ?? [], report)),
-    ]);
-    tableBody(sheet, row, values);
-    if (values.length > 0) {
-      sheet.getRange(row, 1, values.length, 1).setFontWeight('bold')
-        .setBackground(gradeIndex % 2 ? '#e5eef4' : PRINT_COLORS.groupB)
-        .setHorizontalAlignment('center');
-      sheet.getRange(row, 2, values.length, classNumbers.length)
-        .setFontWeight('bold').setHorizontalAlignment('center');
-      const greatest = Math.max(1, ...(table?.rows ?? []).flatMap((slot) =>
-        classNumbers.map((classNumber) => slot.athletesByClass[classNumber]?.length ?? 0)));
-      const heightPerAthlete = report === '当日変更用' ? 92 : 58;
-      sheet.setRowHeights(row, values.length, Math.max(report === '当日変更用' ? 92 : 56, greatest * heightPerAthlete));
-    }
-    row += values.length + 1;
+  let sectionIndex = 0;
+  page.events.forEach((event) => {
+    const grades = gradesForEvent(event);
+    grades.forEach((grade) => {
+      const table = buildConcurrentRosterTables(registrations, grade, [event])[0];
+      // 1競技だけのページは今までどおり学年だけを見出しにする。
+      // 複数競技をまとめたページでは、どの競技の表かが分かるよう競技名を必ず入れる。
+      const label = !multipleEvents
+        ? `${grade}年`
+        : grades.length > 1 ? `${event.eventName}（${grade}年）` : event.eventName;
+      sectionTitle(sheet, row, columnCount, label, sectionIndex % 2 === 1);
+      row += 1;
+      const headers = ['走順・役割', ...classNumbers.map((classNumber) => `${classNumber}組`)];
+      tableHeader(sheet, row, headers);
+      row += 1;
+      const values = (table?.rows ?? []).map((slot) => [
+        slot.slotName,
+        ...classNumbers.map((classNumber) => athleteCell(slot.athletesByClass[classNumber] ?? [], report)),
+      ]);
+      tableBody(sheet, row, values);
+      if (values.length > 0) {
+        sheet.getRange(row, 1, values.length, 1).setFontWeight('bold')
+          .setBackground(sectionIndex % 2 ? '#e5eef4' : PRINT_COLORS.groupB)
+          .setHorizontalAlignment('center');
+        sheet.getRange(row, 2, values.length, classNumbers.length)
+          .setFontWeight('bold').setHorizontalAlignment('center');
+        const greatest = Math.max(1, ...(table?.rows ?? []).flatMap((slot) =>
+          classNumbers.map((classNumber) => slot.athletesByClass[classNumber]?.length ?? 0)));
+        const heightPerAthlete = report === '当日変更用' ? 92 : 58;
+        sheet.setRowHeights(row, values.length, Math.max(report === '当日変更用' ? 92 : 56, greatest * heightPerAthlete));
+      }
+      row += values.length + 1;
+      sectionIndex += 1;
+    });
   });
 }
 
@@ -485,9 +530,11 @@ function writeEventRosterSheets(
   createdAt: string,
   report: '種目別' | '当日変更用',
 ): void {
-  events.forEach((event) => {
-    const sheet = book.insertSheet(uniqueSheetName(book, event.eventName, event.eventId));
-    writeEventRosterSheet(sheet, event, versionName, registrations, students, createdAt, report);
+  buildEventRosterPages(events).forEach((page) => {
+    const sheet = book.insertSheet(
+      uniqueSheetName(book, eventRosterPageTitle(page), page.events[0]?.eventId ?? ''),
+    );
+    writeEventRosterSheet(sheet, page, versionName, registrations, students, createdAt, report);
   });
 }
 
@@ -499,11 +546,13 @@ function writeSystemDataSheet(
   const sheet = book.insertSheet('_管理用データ');
   const headers = [
     'registration_id', 'event_id', 'event_name', 'slot_id', 'slot_name',
-    'grade', 'class_number', 'student_id', 'student_name', 'source_version', 'correction_source',
+    'grade', 'class_number', 'student_id', 'student_name', 'gender', 'source_version',
+    'correction_source',
   ];
   const rows = registrations.map((row) => [
     row.registrationId, row.eventId, row.eventName, row.slotId, row.slotName,
-    row.grade, row.classNumber, row.studentId, row.studentNameSnapshot, row.version,
+    row.grade, row.classNumber, row.studentId, row.studentNameSnapshot,
+    rosterGenderLabel(row.genderSnapshot), row.version,
     correctionSubmissionIds.has(row.sourceSubmissionId),
   ]);
   sheet.getRange(1, 1, 1, headers.length).setValues([headers]);
@@ -601,7 +650,8 @@ function writeClassDistributionPdf(
       addSlideText(
         slide,
         `${registration.eventName}｜${registration.slotName || '選手'}｜`
-          + `${registration.studentNameSnapshot}（${registration.studentId}）`,
+          + `${registration.studentNameSnapshot}（${registration.studentId}・`
+          + `${rosterGenderLabel(registration.genderSnapshot)}）`,
         24 + column * (columnWidth + gap),
         78 + row * rowHeight,
         columnWidth,
@@ -673,13 +723,26 @@ function documentProperties(): GoogleAppsScript.Properties.Properties {
   return PropertiesService.getDocumentProperties();
 }
 
+/**
+ * 名簿作成が途中かどうかだけを見る。保存先を知っているのはこのファイルだけなので、
+ * メニューの有効・無効を決める側は自前で Properties を読まずにこれを呼ぶ。
+ * メニュー構築中に呼ばれるため、`loadRosterJob()`と違って何も書き戻さない。
+ */
+export function isPlayerRosterJobActive(): boolean {
+  return documentProperties().getProperty(ROSTER_JOB_PROPERTY) !== null;
+}
+
 function loadRosterJob(): RosterJobState | undefined {
   const raw = documentProperties().getProperty(ROSTER_JOB_PROPERTY);
   if (!raw) return undefined;
   const state = JSON.parse(raw) as RosterJobState;
-  if (state.reportPlanVersion !== 4) {
+  // 名簿の構成やページの分け方を変えたら必ず上げる。上げ忘れると、途中まで作った名簿が
+  // 古い体裁、残りが新しい体裁になり、1つの版の中で見た目が食い違う。
+  if (state.reportPlanVersion !== ROSTER_REPORT_PLAN_VERSION) {
     state.status = 'ERROR';
-    state.message = '名簿の構成にクラス配布用PDFが追加されました。「途中の名簿作成を取り消す」を実行してから、新しく作成してください。正式データはまだ変更されていません。';
+    state.message = '種目別名簿と当日変更用名簿のページの分け方が変わりました（表示順の100区切りでまとめるようになりました）。'
+      + '途中まで作った名簿と体裁が食い違うため、「途中の名簿作成を取り消す」を実行してから、新しく作成してください。'
+      + '正式データはまだ変更されていません。';
     state.updatedAt = new Date().toISOString();
     documentProperties().setProperty(ROSTER_JOB_PROPERTY, JSON.stringify(state));
   }
@@ -753,7 +816,7 @@ function writeStagingRegistrations(name: string, registrations: Registration[]):
     .setValues(registrations.map((row) => [
       row.registrationId, row.sourceSubmissionId, row.eventId, row.eventName, row.slotId,
       row.slotName, row.studentId, row.studentNameSnapshot, row.grade, row.classNumber,
-      row.version, row.updatedAt, row.updatedBy,
+      row.version, row.updatedAt, row.updatedBy, row.genderSnapshot ?? 'U',
     ]));
   sheet.hideSheet();
 }
@@ -769,6 +832,7 @@ function readStagingRegistrations(name: string): Registration[] {
     grade: Number(row[8]), classNumber: Number(row[9]), version: String(row[10] ?? ''),
     updatedAt: row[11] instanceof Date ? row[11].toISOString() : String(row[11] ?? ''),
     updatedBy: String(row[12] ?? ''),
+    genderSnapshot: normalizeStagingGender(row[13]),
   }));
 }
 
@@ -817,6 +881,8 @@ function uniqueBackupName(): string {
 
 function assertAcceptedSubmissionsAreValid(): void {
   const submissions = readSubmissions();
+  // 帳票へ実在生徒が流れる最後の砦。疑似申請を作った名簿と今の選択が違えば作成しない。
+  assertMockRosterSourceConsistent(submissions);
   const items = readItems();
   const students = readStudents();
   const rules = readRuleSettings();
@@ -874,7 +940,7 @@ export function createPlayerRosters(inputName: string): CreateRosterResult {
     writeSourceSubmissionIds(sourceName, acceptedSubmissions.map((submission) => submission.submissionId));
     const preflight = buildRosterDistributionPreflight(submissions);
     const state: RosterJobState = {
-      reportPlanVersion: 4,
+      reportPlanVersion: ROSTER_REPORT_PLAN_VERSION,
       jobId, inputName: normalizedInputName, versionName, folderId: versionFolder.getId(), folderUrl,
       registrationCount: registrations.length, sourceSubmissionCount: acceptedSubmissions.length,
       createdBy: actor, createdAt, updatedAt: createdAt, nextReportIndex: 0,

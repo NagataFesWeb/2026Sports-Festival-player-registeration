@@ -4,12 +4,22 @@ import {
   SYSTEM_CONFIG_HEADERS,
   SYSTEM_CONFIG_KEYS,
 } from '../shared/constants';
-import { isProductionStudentMasterActive, readStudents } from './repository';
-import { auditManagementSharing } from './security-audit-service';
+import {
+  upsertSystemConfigRows,
+  type SystemMode,
+} from '../core/system-mode';
+import {
+  getSystemMode,
+  isPracticeWorkbook,
+  isProductionMode,
+  systemConfigRows,
+  systemConfigValue,
+} from './mode-probe';
 
-export type SystemMode = 'DEVELOPMENT' | 'PRODUCTION';
+export type { SystemMode };
+export { getSystemMode, isPracticeWorkbook, isProductionMode };
 
-function configuredEditors(): string[] {
+export function listConfiguredEditorEmails(): string[] {
   return (PropertiesService.getScriptProperties()
     .getProperty(SCRIPT_PROPERTIES.authorizedEditorEmails) ?? '')
     .split(/[\s,;]+/)
@@ -17,50 +27,36 @@ function configuredEditors(): string[] {
     .filter(Boolean);
 }
 
-function currentEmail(): string {
+export function currentEditorEmail(): string {
   return (Session.getActiveUser().getEmail() || Session.getEffectiveUser().getEmail())
     .trim().toLowerCase();
 }
 
-export function getSystemMode(): SystemMode {
+/** 運用モードの正本は`システム設定`シート。Script Propertyは互換のため同じ値へそろえる。 */
+export function writeSystemMode(mode: SystemMode): void {
   const spreadsheet = SpreadsheetApp.getActiveSpreadsheet();
-  const local = spreadsheet?.getSheetByName(SHEETS.systemConfig);
-  if (local && local.getLastRow() >= 2) {
-    const values = local.getRange(2, 1, local.getLastRow() - 1, 2).getDisplayValues();
-    const mode = values.find((row) => row[0] === SYSTEM_CONFIG_KEYS.mode)?.[1];
-    if (mode === 'PRACTICE') return 'DEVELOPMENT';
-    if (mode === 'PRODUCTION') return 'PRODUCTION';
+  const local = spreadsheet.getSheetByName(SHEETS.systemConfig)
+    ?? spreadsheet.insertSheet(SHEETS.systemConfig);
+  const rows = upsertSystemConfigRows(systemConfigRows(), SYSTEM_CONFIG_KEYS.mode, mode);
+  local.getRange(1, 1, 1, SYSTEM_CONFIG_HEADERS.length).setValues([[...SYSTEM_CONFIG_HEADERS]]);
+  local.getRange(2, 1, rows.length, 2).setValues(rows);
+  local.hideSheet();
+  const properties = PropertiesService.getScriptProperties();
+  if (mode === 'PRODUCTION') {
+    properties.setProperty(SCRIPT_PROPERTIES.systemMode, 'PRODUCTION');
+    return;
   }
-  const configured = PropertiesService.getScriptProperties()
-    .getProperty(SCRIPT_PROPERTIES.systemMode);
-  if (configured === 'PRODUCTION') return 'PRODUCTION';
-  return 'DEVELOPMENT';
-}
-
-export function isPracticeWorkbook(): boolean {
-  const spreadsheet = SpreadsheetApp.getActiveSpreadsheet();
-  const local = spreadsheet?.getSheetByName(SHEETS.systemConfig);
-  if (!local || local.getLastRow() < 2) return false;
-  return local.getRange(2, 1, local.getLastRow() - 1, 2).getDisplayValues()
-    .some((row) => row[0] === SYSTEM_CONFIG_KEYS.mode && row[1] === 'PRACTICE');
+  properties.deleteProperty(SCRIPT_PROPERTIES.systemMode);
 }
 
 export function getPracticeRootFolderId(): string {
   if (!isPracticeWorkbook()) return '';
-  const spreadsheet = SpreadsheetApp.getActiveSpreadsheet();
-  const local = spreadsheet.getSheetByName(SHEETS.systemConfig);
-  if (!local || local.getLastRow() < 2) return '';
-  return local.getRange(2, 1, local.getLastRow() - 1, 2).getDisplayValues()
-    .find((row) => row[0] === SYSTEM_CONFIG_KEYS.practiceRootFolderId)?.[1] ?? '';
-}
-
-export function isProductionMode(): boolean {
-  return getSystemMode() === 'PRODUCTION';
+  return systemConfigValue(SYSTEM_CONFIG_KEYS.practiceRootFolderId);
 }
 
 export function getAuthorizedEditorEmails(): string[] {
   assertAuthorized();
-  return configuredEditors();
+  return listConfiguredEditorEmails();
 }
 
 export function updateAuthorizedEditorEmails(raw: string): string[] {
@@ -84,10 +80,10 @@ export function updateAuthorizedEditorEmails(raw: string): string[] {
 }
 
 export function assertAuthorized(): string {
-  const email = currentEmail();
+  const email = currentEditorEmail();
   const properties = PropertiesService.getScriptProperties();
   const allowedDomain = properties.getProperty('ALLOWED_DOMAIN')?.trim().toLowerCase();
-  const authorizedEditors = configuredEditors();
+  const authorizedEditors = listConfiguredEditorEmails();
   if (!email && (allowedDomain || authorizedEditors.length > 0 || isProductionMode())) {
     throw new Error('操作するGoogleアカウントを確認できません。許可されたアカウントでログインし直してください。');
   }
@@ -108,44 +104,18 @@ export function assertAuthorized(): string {
   return email;
 }
 
-export function assertDevelopmentMode(): void {
-  if (isProductionMode() || isProductionStudentMasterActive()) {
-    throw new Error('本番運用中は疑似データ機能を使用できません。実在データを守るため処理を中止しました。');
-  }
-}
+/** 内部コード`MOCK_DATA_BLOCKED_IN_PRODUCTION`に対応する表示文言。 */
+const MOCK_DATA_BLOCKED_IN_PRODUCTION_MESSAGE =
+  '本番モードでは疑似データ機能を使用できません。'
+  + '練習する場合は、メニューの「練習用コピーを作成」で作ったコピーを開いてください。';
 
-export function activateProductionMode(): { mode: 'PRODUCTION'; actorEmail: string; message: string } {
-  if (isPracticeWorkbook()) {
-    throw new Error('練習用コピーを本番モードへ切り替えることはできません。本番ファイルを開いて操作してください。');
+/**
+ * 疑似データ機能の入口ガード。
+ * 判定は運用モードだけで行う。生徒マスターに入力があっても、開発モードなら疑似データを作れる。
+ * どちらの名簿を使うかは`疑似データ設定`シートの`疑似申請に使う名簿`で選ぶ。
+ */
+export function assertDevelopmentMode(): void {
+  if (isProductionMode()) {
+    throw new Error(MOCK_DATA_BLOCKED_IN_PRODUCTION_MESSAGE);
   }
-  if (!isProductionStudentMasterActive()) {
-    throw new Error('本番用の「生徒マスター」が空です。学籍番号と氏名を入力し、内容を確認してから切り替えてください。');
-  }
-  // 入力不足・学籍番号不正・重複を本番切替前に必ず検出する。
-  readStudents();
-  const sharing = auditManagementSharing();
-  if (sharing.broadSharingCount > 0) throw new Error(sharing.message);
-  const properties = PropertiesService.getScriptProperties();
-  let editors = configuredEditors();
-  const email = currentEmail();
-  if (editors.length === 0) {
-    if (!email) throw new Error('担当者のGoogleアカウントを確認できないため、本番モードへ切り替えられません。');
-    properties.setProperty(SCRIPT_PROPERTIES.authorizedEditorEmails, email);
-    editors = [email];
-  }
-  if (!email || !editors.includes(email)) {
-    throw new Error('現在のGoogleアカウントが担当者一覧にありません。本番切替は登録済み担当者が実行してください。');
-  }
-  properties.setProperty(SCRIPT_PROPERTIES.systemMode, 'PRODUCTION');
-  const spreadsheet = SpreadsheetApp.getActiveSpreadsheet();
-  const local = spreadsheet.getSheetByName(SHEETS.systemConfig)
-    ?? spreadsheet.insertSheet(SHEETS.systemConfig);
-  local.getRange(1, 1, 1, SYSTEM_CONFIG_HEADERS.length).setValues([[...SYSTEM_CONFIG_HEADERS]]);
-  local.getRange(2, 1, 1, 2).setValues([[SYSTEM_CONFIG_KEYS.mode, 'PRODUCTION']]);
-  local.hideSheet();
-  return {
-    mode: 'PRODUCTION',
-    actorEmail: email,
-    message: '本番モードへ切り替えました。疑似データの作成・追加・削除は無効になりました。',
-  };
 }

@@ -39,6 +39,15 @@ const FORM_KEYS = {
   formsFolderId: 'フォーム保存フォルダID', formsFolderUrl: 'フォーム保存フォルダURL',
 } as const;
 
+/** 「フォーム設計」シートの行順の正本。読み書きと不足行の補修で共有する。 */
+const FORM_DESIGN_ROW_ORDER = [
+  FORM_KEYS.year, FORM_KEYS.normalTitle, FORM_KEYS.correctionTitle, FORM_KEYS.deadline,
+  FORM_KEYS.sendResponseCopy, FORM_KEYS.loginRequired, FORM_KEYS.gradeBranching,
+  FORM_KEYS.normalResubmission, FORM_KEYS.applyBeforeApproval, FORM_KEYS.formStatus,
+  FORM_KEYS.normalFormId, FORM_KEYS.correctionFormId, FORM_KEYS.normalEditUrl,
+  FORM_KEYS.correctionEditUrl, FORM_KEYS.formsFolderId, FORM_KEYS.formsFolderUrl,
+] as const;
+
 function book(): GoogleAppsScript.Spreadsheet.Spreadsheet {
   const value = SpreadsheetApp.getActiveSpreadsheet();
   if (!value) throw new Error('管理用スプレッドシートを開いてから、もう一度操作してください。');
@@ -71,6 +80,44 @@ export function ensureSettingsSheets(): void {
   ensure(SHEETS.rawFormResponses, RAW_FORM_RESPONSE_HEADERS);
   ensure(SHEETS.settingsChangeHistory, SETTINGS_CHANGE_HISTORY_HEADERS);
   ensure(SHEETS.publicSettingsSnapshot, PUBLIC_SETTINGS_SNAPSHOT_HEADERS).hideSheet();
+  ensureFormDesignRows();
+  applySettingsHeaderNotes();
+}
+
+/**
+ * 「フォーム設計」の行が消えていても、入力済みの値を保ったまま不足行を補う。
+ * 行が欠けたままだと、点検が存在しない行番号を案内してしまう。
+ */
+export function ensureFormDesignRows(): void {
+  const sheet = book().getSheetByName(SHEETS.formDesign) ?? ensure(SHEETS.formDesign, FORM_DESIGN_HEADERS);
+  const lastRow = sheet.getLastRow();
+  const existing = lastRow >= 2 ? sheet.getRange(2, 1, lastRow - 1, 2).getValues() : [];
+  const inOrder = existing.length === FORM_DESIGN_ROW_ORDER.length
+    && FORM_DESIGN_ROW_ORDER.every((key, index) => text(existing[index]?.[0]) === key);
+  if (inOrder) return;
+  const savedByKey = new Map<string, Value>();
+  existing.forEach((row) => {
+    const key = text(row[0]);
+    if (key !== '' && !savedByKey.has(key)) savedByKey.set(key, (row[1] ?? '') as Value);
+  });
+  const defaults = formDesignSheetValues(defaultFormDesign());
+  const data = FORM_DESIGN_ROW_ORDER.map((key) => [
+    key,
+    savedByKey.has(key) ? savedByKey.get(key)! : defaults[key] ?? '',
+  ]) as Value[][];
+  if (lastRow > 1) sheet.getRange(2, 1, lastRow - 1, 2).clearContent();
+  sheet.getRange(2, 1, data.length, 2).setValues(data);
+  applyFormDesignDeadlineValidation();
+}
+
+/** 見出しの説明メモを最新にする。点検のたびに呼ぶので、重い書式設定は含めない。 */
+function applySettingsHeaderNotes(): void {
+  const events = book().getSheetByName(SHEETS.eventSettings);
+  if (events) EVENT_SETTING_HEADERS.forEach((header, index) =>
+    events.getRange(1, index + 1).setNote(eventHeaderNote(header)));
+  const rules = book().getSheetByName(SHEETS.ruleSettings);
+  if (rules) RULE_SETTING_HEADERS.forEach((header, index) =>
+    rules.getRange(1, index + 1).setNote(ruleHeaderNote(header)));
 }
 
 export function seedDefaultSettings(): void {
@@ -86,16 +133,13 @@ export function seedDefaultSettings(): void {
   }
   const rules = book().getSheetByName(SHEETS.ruleSettings)!;
   if (rules.getLastRow() < 2) {
-    rules.getRange(2, 1, 9, RULE_SETTING_HEADERS.length).setValues([
-      ['R001', true, '存在しない学籍番号は登録不可', '全競技', '', '生徒マスター存在確認', 0, 'エラー', '学籍番号が確認できません', '', ''],
-      ['R002', true, '学籍番号と氏名が異なる場合は確認', '全競技', '', '氏名照合', 0, '警告', '氏名の表記を確認してください', '', ''],
-      ['R003', true, '同一競技内の重複登録は禁止', '全競技', '', '同一生徒の重複', 1, 'エラー', '同じ選手が重複しています', '', ''],
-      ['R004', true, '必要人数に足りない場合は確認', '全競技', '', '必要人数', 0, 'エラー', '必要な選手枠を確認してください', '', ''],
-      ['R005', false, '1人あたりの出場数上限', '全競技', '', '同一生徒の登録数', 2, 'エラー', '同じ生徒が登録上限を超えています', '互換用見本', ''],
-      ['R006', false, 'リレー重複制限', 'リレー', '', '同一生徒の登録数', 1, 'エラー', 'リレーの重複を確認してください', '互換用見本', ''],
-      ['R007', false, '男子のみ', '指定競技', '', '', '', 'エラー', '男子のみ登録できます', '対象競技を選んで有効にします', 'F == 0 && UNKNOWN == 0'],
-      ['R008', false, '女子のみ', '指定競技', '', '', '', 'エラー', '女子のみ登録できます', '対象競技を選んで有効にします', 'M == 0 && UNKNOWN == 0'],
-      ['R009', false, '男女各2名以上', '指定競技', '', '', '', 'エラー', '男子・女子を各2名以上登録してください', '対象競技を選んで有効にします', 'M >= 2 && F >= 2'],
+    rules.getRange(2, 1, 6, RULE_SETTING_HEADERS.length).setValues([
+      ['R001', true, '同じ競技へ同じ生徒を2回入れない', '全競技', '', '', '', 'エラー', '同じ競技に同じ選手が重複して登録されています', '', 'MAX_PER_EVENT <= 1'],
+      ['R002', true, '氏名の表記違いを確認する', '全競技', '', '', '', '警告', '氏名の表記を確認してください', '氏名欄があった頃の旧回答だけが対象です', 'NAME_MISMATCH == 0'],
+      ['R003', false, '1人あたり2競技までにする', '全競技', '', '', '', '警告', '同じ生徒が3競技以上に登録されています', '競技をまたいだ出場数の上限です', 'MAX_PER_STUDENT <= 2'],
+      ['R004', false, '男子のみ', '指定競技', '', '', '', 'エラー', '男子のみ登録できます', '対象競技を選んで有効にします', 'F == 0 && UNKNOWN == 0'],
+      ['R005', false, '女子のみ', '指定競技', '', '', '', 'エラー', '女子のみ登録できます', '対象競技を選んで有効にします', 'M == 0 && UNKNOWN == 0'],
+      ['R006', false, '男女各2名以上', '指定競技', '', '', '', 'エラー', '男子・女子を各2名以上登録してください', '対象競技を選んで有効にします', 'M >= 2 && F >= 2'],
     ]);
   }
   const design = book().getSheetByName(SHEETS.formDesign)!;
@@ -198,7 +242,7 @@ export function defaultFormDesign(): FormDesignSetting {
 
 function applySettingsValidations(): void {
   const events = book().getSheetByName(SHEETS.eventSettings)!;
-  EVENT_SETTING_HEADERS.forEach((header, index) => events.getRange(1, index + 1).setNote(eventHeaderNote(header)));
+  applySettingsHeaderNotes();
   events.autoResizeColumns(1, EVENT_SETTING_HEADERS.length);
   events.setColumnWidth(5, 180); events.setColumnWidth(12, 220);
   const rowCount = Math.max(events.getMaxRows() - 1, 1);
@@ -207,7 +251,6 @@ function applySettingsValidations(): void {
   events.getRange(2, 6, rowCount).setDataValidation(SpreadsheetApp.newDataValidation().requireValueInList(['男子', '女子', '混合', 'クラス', 'その他'], true).build());
   events.getRange(2, 8, rowCount, 2).setDataValidation(SpreadsheetApp.newDataValidation().requireCheckbox().build());
   const rules = book().getSheetByName(SHEETS.ruleSettings)!;
-  RULE_SETTING_HEADERS.forEach((header, index) => rules.getRange(1, index + 1).setNote(ruleHeaderNote(header)));
   rules.autoResizeColumns(1, RULE_SETTING_HEADERS.length);
   rules.setColumnWidth(3, 220); rules.setColumnWidth(9, 260); rules.setColumnWidth(10, 220);
   rules.setColumnWidth(11, 260);
@@ -252,7 +295,7 @@ function eventHeaderNote(header: string): string {
     '競技名': 'フォームに表示する名前です。', '区分': '男子・女子・混合・クラス・その他から選びます。',
     '必要人数': '各クラスが登録する人数を1以上の半角数字で入力します。', '走順あり': '第1走者のように順番を表示するときチェックします。',
     '欠員許可': '現在調整中を選べるようにするときチェックします。', '招集順': '招集名簿での順番です。',
-    '表示順': 'フォームに出す順番です。重複しない数字を使います。', '備考': '担当者向けのメモです。フォームには表示しません。',
+    '表示順': 'フォームに出す順番です。重複しない数字を使います。修正フォームは、この数字を100ごとに区切ってページを分けます（0・100・200は別ページ、100〜199は同じページ）。同じ競技のまとまりは同じ100番台へ収めてください。', '備考': '担当者向けのメモです。フォームには表示しません。',
   };
   return notes[header] ?? '';
 }
@@ -262,14 +305,54 @@ function ruleHeaderNote(header: string): string {
     'rule_id': '重複しないルールIDです。', '有効': 'チェックしたルールだけ次回検査に使います。',
     'ルール名': '確認画面に表示する名前です。', '対象': 'ルールを適用する競技の範囲です。',
     '対象event_id': '対象競技のチェックから自動保存されます。',
-    '旧条件（互換）': '従来ルール用です。新しいルールでは空欄にします。',
-    '旧上限（互換）': '従来ルール用です。新しいルールでは空欄にします。',
-    '判定': '論理式がFALSEのとき、エラーは承認不可、警告は確認後に承認できます。',
+    '旧条件（互換）': '使用しません。ルールはすべて「論理式」列で決まります。空欄のままにしてください。',
+    '旧上限（互換）': '使用しません。上限は「論理式」列へ MAX_PER_STUDENT <= 2 のように書きます。',
+    '判定': '論理式がFALSE（式のとおりでない）のとき、エラーは承認不可、警告は確認後に承認できます。',
     '表示メッセージ': '問題が見つかったとき利用者へ表示します。', '備考': '未確定のルールは有効を外し、ここへ理由を残します。',
-    '論理式（TRUEなら問題なし）': '例：M >= 2 && F >= 2。TRUEなら問題なし、FALSEなら判定列のエラー・警告になります。',
+    '論理式（TRUEなら問題なし）': RULE_EXPRESSION_NOTE,
   };
   return notes[header] ?? '';
 }
+
+/** 論理式列の見出しメモ。シートで入力する人がその場で書き方を確認できるようにする。 */
+const RULE_EXPRESSION_NOTE = [
+  '「こうなっていれば正しい」状態を式で書きます。',
+  'TRUE（式のとおり）なら問題なし、FALSE（とおりでない）なら、「判定」列に従ってエラーまたは警告を出します。',
+  '',
+  '【よく使う例】',
+  '男子だけで登録する：F == 0 && UNKNOWN == 0',
+  '女子だけで登録する：M == 0 && UNKNOWN == 0',
+  '男女を各2人以上入れる：M >= 2 && F >= 2',
+  '同じ競技へ同じ生徒を2回入れない：MAX_PER_EVENT <= 1',
+  '1人あたり2競技までにする：MAX_PER_STUDENT <= 2',
+  '必要な枠を全部埋める：REQUIRED_EMPTY == 0',
+  '',
+  '【使える言葉（登録内容を数えた数）】',
+  'M：男子の人数 / F：女子の人数 / N：登録人数',
+  'UNKNOWN：性別が分からない登録数（学籍番号を確認できない場合を含む）',
+  'EMPTY：「出場しない」の枠数 / REQUIRED_EMPTY：埋める必要があるのに未登録の枠数',
+  'PENDING：「調整中」の枠数',
+  'UNIQUE：登録された学籍番号の種類数 / DUPLICATE：同じ学籍番号の2件目以降の合計',
+  'MAX_PER_STUDENT：1人の生徒が対象競技全体で登録されている最大回数',
+  'MAX_PER_EVENT：1つの競技の中で1人の生徒が登録されている最大回数（同じ競技内の重複はこちら）',
+  'INVALID_ID：生徒マスターにない学籍番号の登録数',
+  'NAME_MISMATCH：名簿と氏名が違う登録数（氏名入力のある旧回答のみ対象。学籍番号だけの回答では常0）',
+  'CLASS_MISMATCH：対象クラスと所属が違う登録数',
+  '',
+  '【使える記号】',
+  '比べる：>=（以上） <=（以下） >（より大きい） <（より小さい） ==（等しい） !=（等しくない）',
+  'つなぐ：&&（かつ。ANDでも可） ||（または。ORでも可） !（でない。NOTでも可）',
+  '計算とまとめ：+ - * / % と （ ）',
+  '',
+  '【つまずきやすいところ】',
+  '・「等しい」は = ではなく == と二つ重ねます。',
+  '・必ず比べる記号を入れます。「M + F」だけではTRUE・FALSEになりません。',
+  '・スプレッドシートの関数（IF、COUNTIFなど）や氏名・学籍番号は書けません。',
+  '・全角の記号や先頭の = は自動で直して読みます。',
+  '・対象の競技はこの式ではなく、右側の「対象競技」チェック欄で選びます。',
+  '',
+  '入力後は「設定を点検」を実行すると、式の間違いを行番号付きで知らせます。',
+].join('\n');
 
 function rows(sheetName: string, width: number): Value[][] {
   const sheet = book().getSheetByName(sheetName);
@@ -320,7 +403,12 @@ export function readRuleSettings(): RuleSetting[] {
 }
 
 export function readFormDesign(): FormDesignSetting {
-  const values = new Map(rows(SHEETS.formDesign, 2).map((row) => [text(row[0]), row[1]]));
+  const sheetRows = rows(SHEETS.formDesign, 2);
+  const values = new Map(sheetRows.map((row) => [text(row[0]), row[1]]));
+  const rowNumberOf = (key: string): number | undefined => {
+    const index = sheetRows.findIndex((row) => text(row[0]) === key);
+    return index < 0 ? undefined : index + 2;
+  };
   const fallback = defaultFormDesign();
   return {
     year: num(values.get(FORM_KEYS.year)) || fallback.year,
@@ -332,21 +420,42 @@ export function readFormDesign(): FormDesignSetting {
     normalFormId: text(values.get(FORM_KEYS.normalFormId)), correctionFormId: text(values.get(FORM_KEYS.correctionFormId)),
     normalEditUrl: text(values.get(FORM_KEYS.normalEditUrl)), correctionEditUrl: text(values.get(FORM_KEYS.correctionEditUrl)),
     formsFolderId: text(values.get(FORM_KEYS.formsFolderId)), formsFolderUrl: text(values.get(FORM_KEYS.formsFolderUrl)),
+    rowNumbers: {
+      year: rowNumberOf(FORM_KEYS.year),
+      normalTitle: rowNumberOf(FORM_KEYS.normalTitle),
+      correctionTitle: rowNumberOf(FORM_KEYS.correctionTitle),
+      deadline: rowNumberOf(FORM_KEYS.deadline),
+      loginRequired: rowNumberOf(FORM_KEYS.loginRequired),
+    },
+  };
+}
+
+function formDesignSheetValues(value: FormDesignSetting): Record<string, Value> {
+  return {
+    [FORM_KEYS.year]: value.year,
+    [FORM_KEYS.normalTitle]: value.normalTitle,
+    [FORM_KEYS.correctionTitle]: value.correctionTitle,
+    [FORM_KEYS.deadline]: deadlineSheetValue(value.deadline),
+    [FORM_KEYS.sendResponseCopy]: value.sendResponseCopy,
+    [FORM_KEYS.loginRequired]: value.loginRequired,
+    [FORM_KEYS.gradeBranching]: value.gradeBranching,
+    [FORM_KEYS.normalResubmission]: value.normalResubmission,
+    [FORM_KEYS.applyBeforeApproval]: value.applyBeforeApproval,
+    [FORM_KEYS.formStatus]: value.formStatus,
+    [FORM_KEYS.normalFormId]: value.normalFormId,
+    [FORM_KEYS.correctionFormId]: value.correctionFormId,
+    [FORM_KEYS.normalEditUrl]: value.normalEditUrl,
+    [FORM_KEYS.correctionEditUrl]: value.correctionEditUrl,
+    [FORM_KEYS.formsFolderId]: value.formsFolderId,
+    [FORM_KEYS.formsFolderUrl]: value.formsFolderUrl,
   };
 }
 
 export function writeFormDesign(value: FormDesignSetting): void {
   const sheet = book().getSheetByName(SHEETS.formDesign) ?? ensure(SHEETS.formDesign, FORM_DESIGN_HEADERS);
   if (sheet.getLastRow() > 1) sheet.getRange(2, 1, sheet.getLastRow() - 1, 2).clearContent();
-  const data: Value[][] = [
-    [FORM_KEYS.year, value.year], [FORM_KEYS.normalTitle, value.normalTitle], [FORM_KEYS.correctionTitle, value.correctionTitle],
-    [FORM_KEYS.deadline, deadlineSheetValue(value.deadline)], [FORM_KEYS.sendResponseCopy, value.sendResponseCopy], [FORM_KEYS.loginRequired, value.loginRequired],
-    [FORM_KEYS.gradeBranching, value.gradeBranching], [FORM_KEYS.normalResubmission, value.normalResubmission],
-    [FORM_KEYS.applyBeforeApproval, value.applyBeforeApproval], [FORM_KEYS.formStatus, value.formStatus],
-    [FORM_KEYS.normalFormId, value.normalFormId], [FORM_KEYS.correctionFormId, value.correctionFormId],
-    [FORM_KEYS.normalEditUrl, value.normalEditUrl], [FORM_KEYS.correctionEditUrl, value.correctionEditUrl],
-    [FORM_KEYS.formsFolderId, value.formsFolderId], [FORM_KEYS.formsFolderUrl, value.formsFolderUrl],
-  ];
+  const values = formDesignSheetValues(value);
+  const data = FORM_DESIGN_ROW_ORDER.map((key) => [key, values[key] ?? '']) as Value[][];
   sheet.getRange(2, 1, data.length, 2).setValues(data);
   applyFormDesignDeadlineValidation();
 }

@@ -1,4 +1,12 @@
-import { appliesToGrade, buildCorrectionSlotDefinitions } from '../core/settings';
+import {
+  appliesToGrade,
+  buildCorrectionSections,
+  buildCorrectionSlotDefinitions,
+  CORRECTION_BRANCH_HELP,
+  CORRECTION_PAGE_HELP,
+  correctionSectionPageTitle,
+  type CorrectionSection,
+} from '../core/settings';
 import {
   isStudentIdField,
   STUDENT_ID_RESPONSE_ERROR,
@@ -110,35 +118,44 @@ export function addCorrectionFormBase(form: GoogleAppsScript.Forms.Form): number
   addRegistry(registry, 'correction', form, targetClass, '修正対象クラス', 'target_class', '', 'list', 3);
   addParagraph(form, registry, 'correction', 'correction_reason', '',
     '修正する理由と変更内容', 3, true,
-    '例：第2走者を変更しました。競技全体の現在の登録内容を、次のページですべて入力してください。');
+    '例：第2走者を変更しました。次のページで、選んだまとまりに含まれる競技の現在の登録内容をすべて入力してください。');
   const eventQuestion = form.addMultipleChoiceItem().setTitle('修正する競技').setRequired(true)
-    .setHelpText('1回の送信で修正できる競技は1つです。選んだ競技の全選手を入力してください。');
+    .setHelpText(CORRECTION_BRANCH_HELP);
   addRegistry(registry, 'correction', form, eventQuestion, '修正する競技', 'correction_event_id', '', 'multiple_choice', 10);
   appendFormRegistryChunk(registry);
   return eventQuestion.getId();
 }
 
-export function addCorrectionEventChunk(form: GoogleAppsScript.Forms.Form, event: EventSetting): number {
+/**
+ * 競技1件ずつ作る。セクションの先頭競技のときだけページを作り、そのページIDを返す。
+ * 2件目以降は同じページへ続けて追加するため`undefined`を返す。
+ */
+export function addCorrectionEventChunk(
+  form: GoogleAppsScript.Forms.Form,
+  event: EventSetting,
+  newSection: CorrectionSection | undefined,
+): number | undefined {
   const registry: FormRegistryRow[] = [];
-  const page = form.addPageBreakItem().setTitle(`${event.eventName}（${event.category}）をすべて入力`)
-    .setHelpText('変更した人だけでなく、この競技に登録する全員を入力してください。');
+  const page = newSection
+    ? form.addPageBreakItem().setTitle(correctionSectionPageTitle(newSection))
+      .setHelpText(CORRECTION_PAGE_HELP)
+    : undefined;
   addCorrectionEventItems(form, registry, event);
-  page.setGoToPage(FormApp.PageNavigationType.SUBMIT);
+  page?.setGoToPage(FormApp.PageNavigationType.SUBMIT);
   appendFormRegistryChunk(registry);
-  return page.getId();
+  return page?.getId();
 }
 
 export function finalizeCorrectionFormBranches(
   form: GoogleAppsScript.Forms.Form,
   questionId: number,
-  events: EventSetting[],
+  sections: CorrectionSection[],
   pageIds: number[],
 ): void {
   const question = form.getItemById(questionId).asMultipleChoiceItem();
   const pages = pageIds.map((id) => form.getItemById(id).asPageBreakItem());
-  question.setChoices(events.map((event, index) => question.createChoice(
-    `${event.eventName}（${event.category} / ${event.eventId}）`, pages[index]!,
-  )));
+  question.setChoices(sections.map((section, index) =>
+    question.createChoice(section.choice, pages[index]!)));
 }
 
 function appendFormRegistryChunk(registry: FormRegistryRow[]): void {
@@ -175,7 +192,7 @@ function configureForm(
 ): void {
   const purpose = correction ? '提出済み内容の修正を申請するフォームです。' : 'クラスの選手を登録するフォームです。';
   form
-    .setDescription(`${purpose}\n締切：${design.deadline}\n送信しただけでは正式名簿へ反映されません。招集パートの承認後に反映されます。`)
+    .setDescription(`${purpose}\n締切：${design.deadline}\n選手は学籍番号（半角数字4桁）だけを入力します。氏名は名簿から自動で照合するため、送信前に番号の間違いがないか確かめてください。\n送信しただけでは正式名簿へ反映されません。招集パートの承認後に反映されます。`)
     .setCollectEmail(design.loginRequired)
     .setLimitOneResponsePerUser(!correction && design.normalResubmission === '禁止')
     .setShowLinkToRespondAgain(false)
@@ -214,7 +231,7 @@ function addEventItems(
   event: EventSetting,
 ): void {
   form.addSectionHeaderItem().setTitle(`${event.eventName}（${event.category}）`)
-    .setHelpText(`必要人数：${event.requiredCount}人`);
+    .setHelpText(`必要人数：${event.requiredCount}人。学籍番号（半角数字4桁）だけを入力します。氏名は名簿から自動で照合します。`);
   for (let index = 1; index <= event.requiredCount; index += 1) {
     const slot = String(index).padStart(2, '0');
     const slotLabel = event.hasOrder ? `第${index}走者` : `${index}人目`;
@@ -226,8 +243,6 @@ function addEventItems(
     }
     addText(form, registry, 'normal', `${event.eventId}_slot${slot}_student_id`, event.eventId,
       `${event.eventName} ${slotLabel} 学籍番号`, event.displayOrder * 100 + index * 10 + 1, !event.vacancyAllowed);
-    addText(form, registry, 'normal', `${event.eventId}_slot${slot}_name`, event.eventId,
-      `${event.eventName} ${slotLabel} 氏名`, event.displayOrder * 100 + index * 10 + 2, !event.vacancyAllowed);
   }
 }
 
@@ -245,19 +260,19 @@ function buildCorrectionForm(
   addRegistry(registry, 'correction', form, targetClass, '修正対象クラス', 'target_class', '', 'list', 3);
   addParagraph(form, registry, 'correction', 'correction_reason', '',
     '修正する理由と変更内容', 3, true,
-    '例：第2走者を変更しました。競技全体の現在の登録内容を、次のページですべて入力してください。');
+    '例：第2走者を変更しました。次のページで、選んだまとまりに含まれる競技の現在の登録内容をすべて入力してください。');
   const eventQuestion = form.addMultipleChoiceItem().setTitle('修正する競技').setRequired(true)
-    .setHelpText('1回の送信で修正できる競技は1つです。選んだ競技の全選手を入力してください。');
+    .setHelpText(CORRECTION_BRANCH_HELP);
   addRegistry(registry, 'correction', form, eventQuestion, '修正する競技', 'correction_event_id', '', 'multiple_choice', 10);
-  const eventPages = events.map((event) => {
-    const page = form.addPageBreakItem().setTitle(`${event.eventName}（${event.category}）をすべて入力`)
-      .setHelpText('変更した人だけでなく、この競技に登録する全員を入力してください。');
-    addCorrectionEventItems(form, registry, event);
+  const sectionPages = buildCorrectionSections(events).map((section) => {
+    const page = form.addPageBreakItem().setTitle(correctionSectionPageTitle(section))
+      .setHelpText(CORRECTION_PAGE_HELP);
+    section.events.forEach((event) => addCorrectionEventItems(form, registry, event));
     page.setGoToPage(FormApp.PageNavigationType.SUBMIT);
-    return { event, page };
+    return { section, page };
   });
-  eventQuestion.setChoices(eventPages.map(({ event, page }) =>
-    eventQuestion.createChoice(`${event.eventName}（${event.category} / ${event.eventId}）`, page),
+  eventQuestion.setChoices(sectionPages.map(({ section, page }) =>
+    eventQuestion.createChoice(section.choice, page),
   ));
 }
 
@@ -266,17 +281,19 @@ function addCorrectionEventItems(
   registry: FormRegistryRow[],
   event: EventSetting,
 ): void {
+  // 1ページへ複数の競技が並ぶため、競技名の見出しを必ず付ける。
+  form.addSectionHeaderItem().setTitle(`${event.eventName}（${event.category}）`)
+    .setHelpText(`必要人数：${event.requiredCount}人。この競技に登録する全員を入力してください。`);
   for (const slot of buildCorrectionSlotDefinitions(event)) {
     if (event.vacancyAllowed) {
-      const state = form.addMultipleChoiceItem().setTitle(`${slot.label} 登録状態`)
+      const stateTitle = `${event.eventName} ${slot.label} 登録状態`;
+      const state = form.addMultipleChoiceItem().setTitle(stateTitle)
         .setChoiceValues(['選手を登録する', '現在調整中', '出場しない']).setRequired(true);
-      addRegistry(registry, 'correction', form, state, `${slot.label} 登録状態`,
+      addRegistry(registry, 'correction', form, state, stateTitle,
         slot.stateFieldKey, event.eventId, 'multiple_choice', event.displayOrder * 100 + slot.index * 10);
     }
     addText(form, registry, 'correction', slot.studentIdFieldKey, event.eventId,
       `${event.eventName} ${slot.label} 学籍番号`, event.displayOrder * 100 + slot.index * 10 + 1, !event.vacancyAllowed);
-    addText(form, registry, 'correction', slot.nameFieldKey, event.eventId,
-      `${event.eventName} ${slot.label} 氏名`, event.displayOrder * 100 + slot.index * 10 + 2, !event.vacancyAllowed);
   }
 }
 

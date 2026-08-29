@@ -20,6 +20,7 @@ const SYSTEM_SHEETS = [
   SHEETS.systemConfig,
   SHEETS.settingsChangeHistory,
   SHEETS.publicSettingsSnapshot,
+  SHEETS.liveFormTest,
 ] as const;
 
 function configuredEditors(): string[] {

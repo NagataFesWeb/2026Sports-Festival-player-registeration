@@ -72,6 +72,8 @@ function buildItems(submissionId: string, context: FormAnswerContext): Submissio
   return studentIdMappings
     .filter((mapping) => Object.prototype.hasOwnProperty.call(context.answersByFieldKey, mapping.fieldKey))
     .map((mapping, index) => {
+      // 現在のフォームは学籍番号だけを聞く。氏名欄があった頃に公開したフォームの回答も
+      // そのまま取り込めるよう、氏名の回答があれば読み取る。
       const nameKey = mapping.fieldKey.replace(/_student_id$/, '_name');
       const stateKey = mapping.fieldKey.replace(/_student_id$/, '_state');
       const slotMatch = mapping.fieldKey.match(/_slot(\d+)_student_id$/);

@@ -37,6 +37,26 @@ describe('フォーム回答の申請変換', () => {
     expect(result.items).toHaveLength(2);
   });
 
+  it('氏名欄のないフォーム回答を学籍番号だけで変換する', () => {
+    const result = convertFormAnswer({
+      formId: 'form-3', responseId: 'response-3', formType: 'normal',
+      submittedAt: '2026-07-17T00:00:00.000Z', respondentEmail: 'mock@example.invalid', receptionOpen: true,
+      answersByFieldKey: {
+        submitter_student_id: '1101', submitter_name_input: '架空生徒', target_grade: '1年',
+        target_class: '1組', is_proxy: '自分のクラスを入力',
+        RELAY_slot01_student_id: '1102',
+        RELAY_slot02_student_id: '1103',
+      },
+      registry: [
+        mapping('RELAY_slot01_student_id', '10', 'RELAY'),
+        mapping('RELAY_slot02_student_id', '20', 'RELAY'),
+      ], events: [event],
+    });
+    expect(result.items.map((item) => item.studentIdInput)).toEqual(['1102', '1103']);
+    expect(result.items.map((item) => item.studentNameInput)).toEqual(['', '']);
+    expect(result.items.map((item) => item.registrationState)).toEqual(['REGISTER', 'REGISTER']);
+  });
+
   it('修正フォームは選択した1競技の全走者をCORRECTIONとして変換する', () => {
     const registry = [1, 2].flatMap((slot) => [
       { ...mapping(`correction_RELAY_slot0${slot}_student_id`, `${slot}0`, 'RELAY'), formType: 'correction' as const },

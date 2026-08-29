@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { appliesToGrade, buildCorrectionSlotDefinitions, calculateFormBuildProgress, calculateRegistrationCapacity, formatJapaneseCalendarDate, hasConfigInput, hasRuleConfigInput, parseCalendarDate, resolveRuleTargetSelection, shouldProcessNextFormBuildChunk, validateSettings } from '../../src/core/settings';
+import { appliesToGrade, buildCorrectionSections, buildCorrectionSlotDefinitions, correctionSectionKey, calculateFormBuildProgress, calculateRegistrationCapacity, formatJapaneseCalendarDate, hasConfigInput, hasRuleConfigInput, parseCalendarDate, resolveRuleTargetSelection, shouldProcessNextFormBuildChunk, validateSettings } from '../../src/core/settings';
 import type { EventSetting, FormDesignSetting, RuleSetting } from '../../src/shared/types';
 
 const form: FormDesignSetting = {
@@ -16,8 +16,8 @@ const event = (values: Partial<EventSetting> = {}): EventSetting => ({
 });
 const rule = (values: Partial<RuleSetting> = {}): RuleSetting => ({
   ruleId: 'R001', enabled: true, ruleName: '指定競技の確認', target: '指定競技',
-  targetEventIds: 'E001', condition: '同一生徒の登録数', limit: 2, judgment: 'エラー',
-  displayMessage: '上限を確認してください', note: '', ...values,
+  targetEventIds: 'E001', condition: '', limit: Number.NaN, judgment: 'エラー',
+  displayMessage: '上限を確認してください', note: '', expression: 'MAX_PER_STUDENT <= 2', ...values,
 });
 
 describe('フォーム作成の一括処理上限', () => {
@@ -68,6 +68,22 @@ describe('設定点検', () => {
   it('個人Googleアカウント運用でも回答者メールを記録するためログインを必須にする', () => {
     const result = validateSettings([event()], [rule()], { ...form, loginRequired: false });
     expect(result.issues.some((issue) => issue.targetId === 'ログイン必須')).toBe(true);
+  });
+
+  it('フォーム設計の行番号は、シートの実際の行を案内する', () => {
+    const result = validateSettings([event()], [rule()], {
+      ...form,
+      loginRequired: false,
+      normalTitle: '',
+      rowNumbers: { loginRequired: 12, normalTitle: 9 },
+    });
+    expect(result.issues.find((issue) => issue.targetId === 'ログイン必須')?.rowNumber).toBe(12);
+    expect(result.issues.find((issue) => issue.targetId === '通常フォームタイトル')?.rowNumber).toBe(9);
+  });
+
+  it('行番号が分からないときは既定の行を案内する', () => {
+    const result = validateSettings([event()], [rule()], { ...form, loginRequired: false });
+    expect(result.issues.find((issue) => issue.targetId === 'ログイン必須')?.rowNumber).toBe(7);
   });
 
   it('重複ID、必要人数、存在しない対象競技を初心者向けに示す', () => {
@@ -201,7 +217,7 @@ describe('設定点検', () => {
     expect(slots).toHaveLength(4);
     expect(slots.map((slot) => slot.label)).toEqual(['第1走者', '第2走者', '第3走者', '第4走者']);
     expect(slots[3]?.studentIdFieldKey).toBe('correction_RELAY_slot04_student_id');
-    expect(slots[3]?.nameFieldKey).toBe('correction_RELAY_slot04_name');
+    expect(Object.keys(slots[3] ?? {})).not.toContain('nameFieldKey');
   });
 
   it('フォーム対象の有効な競技がなければエラーにする', () => {
@@ -236,5 +252,44 @@ describe('設定点検', () => {
       condition: '', limit: Number.NaN, expression: 'M >= 2 && F >= 2 && UNKNOWN == 0',
     })], form);
     expect(result.ruleErrorCount).toBe(0);
+  });
+});
+
+describe('修正フォームのセクション', () => {
+  const ev = (eventId: string, eventName: string, displayOrder: number): EventSetting =>
+    event({ eventId, eventName, displayOrder });
+
+  it('表示順を100ごとに区切る。0・100・200は別、101〜103は100と同じ', () => {
+    const events = [
+      ev('A', '女子リレー', 0), ev('B', '男子リレー', 100),
+      ev('C', '棒引き 1回戦', 101), ev('D', '棒引き 2回戦', 102), ev('E', '棒引き 3回戦', 103),
+      ev('F', '玉入れ', 200),
+    ];
+    expect(buildCorrectionSections(events).map((section) => [section.key, section.events.map((e) => e.eventId)]))
+      .toEqual([[0, ['A']], [1, ['B', 'C', 'D', 'E']], [2, ['F']]]);
+  });
+
+  it('競技名の共通部分をセクション名にし、選択肢を組み立てる', () => {
+    const sections = buildCorrectionSections([
+      ev('A', '棒引き 1~4回戦チーム1', 500), ev('B', '棒引き 5回戦チーム女1', 501),
+      ev('C', '騎馬　騎馬上 1', 600), ev('D', '騎馬　騎馬下 1', 601),
+      ev('E', '玉入れ', 700),
+    ]);
+    expect(sections.map((section) => section.title)).toEqual(['棒引き', '騎馬', '玉入れ']);
+    expect(sections.map((section) => section.choice))
+      .toEqual(['棒引き（2競技）', '騎馬（2競技）', '玉入れ（男子 / E）']);
+  });
+
+  it('共通部分がない場合も読める名前にし、選択肢を重複させない', () => {
+    const sections = buildCorrectionSections([
+      ev('A', '玉入れ', 0), ev('B', '大縄跳び', 1),
+      ev('C', '玉入れ', 100), ev('D', '大縄跳び', 101),
+    ]);
+    expect(sections.map((section) => section.choice))
+      .toEqual(['玉入れ ほか1競技', '玉入れ ほか1競技［C］']);
+  });
+
+  it('表示順が空欄の競技は0番台として扱う', () => {
+    expect(correctionSectionKey(event({ displayOrder: Number.NaN }))).toBe(0);
   });
 });

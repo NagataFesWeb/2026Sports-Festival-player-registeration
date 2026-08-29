@@ -1,5 +1,5 @@
 import { convertFormAnswer } from '../core/form-response';
-import { appliesToGrade } from '../core/settings';
+import { appliesToGrade, buildCorrectionSections, type CorrectionSection } from '../core/settings';
 import { ISSUE_CODES, validateSubmission } from '../core/validation';
 import type {
   EventSetting,
@@ -56,6 +56,10 @@ export function generateMockSubmissions(
   if (!correctionEventId || !correctionEvent) {
     throw new Error('修正フォームに競技の学籍番号欄がありません。フォームを作り直してください。');
   }
+  const defaultCorrectionSection = applicableCorrectionSections(
+    source,
+    correctionEvent.targetGrade === '全学年' ? normalGrade : Number(correctionEvent.targetGrade[0]),
+  ).find((section) => section.events.some((event) => event.eventId === correctionEventId));
   const correctionGrade = correctionEvent.targetGrade === '全学年'
     ? normalGrade
     : Number(correctionEvent.targetGrade[0]);
@@ -72,11 +76,9 @@ export function generateMockSubmissions(
     }),
     makeScenario(source, 'mock-response-03', 'normal', normalGrade, 3, true, (answers, keys) => {
       answers[keys[0]!] = '9999';
-      answers[keys[0]!.replace(/_student_id$/, '_name')] = '存在しない架空生徒';
       if (keys[1]) {
         const otherClass = studentAt(source.students, normalGrade, 4, 2);
         answers[keys[1]] = otherClass.studentId;
-        answers[keys[1].replace(/_student_id$/, '_name')] = otherClass.name;
       }
     }),
     makeScenario(source, 'mock-response-04', 'correction', correctionGrade, 4, false, (answers, keys) => {
@@ -84,7 +86,7 @@ export function generateMockSubmissions(
       if (stateKey && source.correctionRegistry.some((mapping) => mapping.fieldKey === stateKey)) {
         answers[stateKey] = '現在調整中';
       }
-    }, correctionEventId),
+    }, defaultCorrectionSection),
     makeScenario(source, 'mock-response-05', 'normal', normalGrade, 1, true),
   ];
 
@@ -120,9 +122,9 @@ function assertConfiguredScenariosMatchRequestedProblems(
     if (unexpected.length === 0 && missingExpected.length === 0) return;
     const problem = unexpected[0];
     const target = `${scenario.submission.targetGrade}年${scenario.submission.targetClass}組`;
-    if (problem?.issueCode === ISSUE_CODES.DUPLICATE_STUDENT) {
+    if (problem?.issueCode === ISSUE_CODES.RULE_EXPRESSION_FALSE) {
       throw new Error(
-        `疑似データを作成する前の点検で、${target}に意図しない選手重複が見つかりました。${problem.displayTitle}。競技設定の必要人数と、ルール設定の重複上限・対象競技を確認してください。疑似データは書き換えていません。`,
+        `疑似データを作成する前の点検で、${target}がルール設定の論理式を満たせませんでした。${problem.displayTitle}。競技設定の必要人数と、ルール設定の論理式・対象競技を確認してください。疑似データは書き換えていません。`,
       );
     }
     throw new Error(
@@ -131,10 +133,10 @@ function assertConfiguredScenariosMatchRequestedProblems(
   });
 }
 
+/** 学籍番号の検査は常時エラーなので、疑似データは2種類の誤りを交互に作る。 */
 function configuredErrorCode(source: MockFormSource, index: number): string {
-  const studentMasterErrorEnabled = !source.rules || source.rules.some((rule) =>
-    rule.enabled && rule.condition.includes('生徒マスター存在確認') && rule.judgment === 'エラー');
-  return studentMasterErrorEnabled && index % 2 === 0
+  void source;
+  return index % 2 === 0
     ? ISSUE_CODES.STUDENT_ID_INVALID
     : ISSUE_CODES.STUDENT_CLASS_MISMATCH;
 }
@@ -187,10 +189,10 @@ function generateConfiguredMockSubmissions(
     const formType: FormRegistryRow['formType'] = formTypes.size === 2
       ? classOccurrence === 0 ? 'normal' : 'correction'
       : formTypes.has('normal') ? 'normal' : 'correction';
-    const correctionEventIds = applicableCorrectionEventIds(source, grade);
-    const correctionEventId = formType === 'correction'
-      ? correctionEventIds[classOccurrence % correctionEventIds.length]!
-      : '';
+    const correctionSections = applicableCorrectionSections(source, grade);
+    const correctionSection = formType === 'correction'
+      ? correctionSections[classOccurrence % correctionSections.length]
+      : undefined;
     const isError = index < config.errorSubmissionCount;
     const warningIndex = index - config.errorSubmissionCount;
     const isWarning = warningIndex >= 0 && warningIndex < config.warningSubmissionCount;
@@ -200,12 +202,10 @@ function generateConfiguredMockSubmissions(
         const key = keys[0]!;
         if (configuredErrorCode(source, index) === ISSUE_CODES.STUDENT_ID_INVALID) {
           answers[key] = '9999';
-          answers[key.replace(/_student_id$/, '_name')] = '存在しない架空生徒';
         } else {
           const otherClass = classNumber === 8 ? 7 : classNumber + 1;
           const other = studentAt(source.students, grade, otherClass, 1);
           answers[key] = other.studentId;
-          answers[key.replace(/_student_id$/, '_name')] = other.name;
         }
       }
       : isWarning
@@ -226,7 +226,7 @@ function generateConfiguredMockSubmissions(
       classNumber,
       receptionOpen,
       mutate,
-      correctionEventId,
+      correctionSection,
       classOccurrence,
     ));
   }
@@ -238,16 +238,22 @@ function generateConfiguredMockSubmissions(
   };
 }
 
-function applicableCorrectionEventIds(source: MockFormSource, grade: number): string[] {
-  const ids = [...new Set(studentIdMappings(source.correctionRegistry, 'correction').map((row) => row.eventId))]
-    .filter((eventId) => {
-      const event = source.events.find((candidate) => candidate.eventId === eventId);
-      return Boolean(event && appliesToGrade(event, grade));
-    });
-  if (ids.length === 0) {
+/**
+ * 修正フォームは表示順100ごとのセクション単位で1ページなので、疑似回答もセクション単位で作る。
+ * その学年に出せる競技が1つでも含まれるセクションだけを対象にする。
+ */
+function applicableCorrectionSections(source: MockFormSource, grade: number): CorrectionSection[] {
+  const formEventIds = new Set(studentIdMappings(source.correctionRegistry, 'correction')
+    .map((row) => row.eventId));
+  const events = [...source.events]
+    .filter((event) => formEventIds.has(event.eventId))
+    .sort((left, right) => left.displayOrder - right.displayOrder);
+  const sections = buildCorrectionSections(events)
+    .filter((section) => section.events.some((event) => appliesToGrade(event, grade)));
+  if (sections.length === 0) {
     throw new Error(`${grade}年に対応する修正フォームの競技がありません。フォームを作り直してください。`);
   }
-  return ids;
+  return sections;
 }
 
 function makeScenario(
@@ -258,15 +264,17 @@ function makeScenario(
   classNumber: number,
   receptionOpen: boolean,
   mutate?: AnswerMutator,
-  correctionEventId = '',
+  correctionSection?: CorrectionSection,
   studentOffset = 0,
 ): ScenarioResult {
   const registry = formType === 'normal' ? source.normalRegistry : source.correctionRegistry;
   const formId = formType === 'normal' ? source.normalFormId : source.correctionFormId;
+  // 修正フォームはセクション単位で1ページなので、そのセクションの全競技の枠を埋める。
+  const sectionEventIds = new Set(correctionSection?.events.map((event) => event.eventId) ?? []);
   const mappings = studentIdMappings(registry, formType).filter((mapping) => {
     const event = source.events.find((candidate) => candidate.eventId === mapping.eventId);
     return formType === 'correction'
-      ? mapping.eventId === correctionEventId
+      ? sectionEventIds.has(mapping.eventId)
       : Boolean(event && appliesToGrade(event, grade));
   });
   if (mappings.length === 0) throw new Error(`${grade}年用フォームに選手の入力欄がありません。競技設定を確認してください。`);
@@ -280,7 +288,7 @@ function makeScenario(
     target_class: formType === 'correction' ? `${grade}年${classNumber}組` : `${classNumber}組`,
     is_proxy: '自分のクラスを入力',
   };
-  if (formType === 'correction') answers.correction_event_id = correctionEventId;
+  if (formType === 'correction') answers.correction_event_id = correctionSection?.choice ?? '';
   const assignedStudents = assignStudentsWithoutRuleViolations(
     source, mappings, classStudents, studentOffset, grade, classNumber,
   );
@@ -289,11 +297,9 @@ function makeScenario(
     const stateKey = mapping.fieldKey.replace(/_student_id$/, '_state');
     if (student) {
       answers[mapping.fieldKey] = student.studentId;
-      answers[mapping.fieldKey.replace(/_student_id$/, '_name')] = student.name;
       if (registryKeys.has(stateKey)) answers[stateKey] = '選手を登録する';
     } else {
       answers[mapping.fieldKey] = '';
-      answers[mapping.fieldKey.replace(/_student_id$/, '_name')] = '';
       if (registryKeys.has(stateKey)) answers[stateKey] = '出場しない';
     }
   });
@@ -333,7 +339,7 @@ function assignStudentsWithoutRuleViolations(
   grade: number,
   classNumber: number,
 ): Array<Student | undefined> {
-  const rules = mockDuplicateRules(source);
+  const rules = mockDuplicateRules(mappings.length, classStudents.length);
   assertMockRuleCapacity(source, rules, mappings, classStudents.length, grade, classNumber);
   const counts = new Map<string, number>();
   const totalByStudent = new Map<string, number>();
@@ -425,27 +431,23 @@ function sourceEventNameForCapacity(
   return event ? `${event.eventName}（${eventId}）` : `${eventId}（同一競技内）`;
 }
 
-function mockDuplicateRules(source: MockFormSource): MockDuplicateRule[] {
-  const configured = source.rules?.filter((rule) => rule.enabled && rule.condition.includes('同一生徒'));
-  if (!configured) return [{
-    ruleId: 'DEFAULT_DUPLICATE', ruleName: '同一選手の重複', limit: 1, perEvent: false,
-    applies: () => true,
-  }];
-  return configured.map((rule) => ({
-    ruleId: rule.ruleId,
-    ruleName: rule.ruleName || rule.ruleId,
-    limit: Number.isFinite(rule.limit) && rule.limit >= 1 ? Math.trunc(rule.limit) : 1,
-    perEvent: rule.condition.includes('重複') && !rule.condition.includes('登録数'),
-    applies: (mapping: FormRegistryRow): boolean => {
-      const event = source.events.find((candidate) => candidate.eventId === mapping.eventId);
-      if (rule.target === '全競技') return true;
-      if (rule.target === '指定競技') {
-        return rule.targetEventIds.split(',').map((value) => value.trim()).includes(mapping.eventId);
-      }
-      if (rule.target === 'リレー') return Boolean(event?.eventName.includes('リレー'));
-      return Boolean(event && !event.eventName.includes('リレー'));
+/**
+ * 疑似データの割り当て方針。ルール設定の論理式は読まず、
+ * 同じ競技内で同じ生徒を使わず、全体ではできるだけ均等に割り当てる。
+ * 登録枠が生徒数を超えるときだけ、埋めるのに必要な回数を上限にする。
+ */
+function mockDuplicateRules(slotCount: number, studentCount: number): MockDuplicateRule[] {
+  const perStudentLimit = studentCount > 0 ? Math.max(1, Math.ceil(slotCount / studentCount)) : 1;
+  return [
+    {
+      ruleId: 'MOCK_PER_EVENT', ruleName: '同じ競技内で同じ生徒を使わない',
+      limit: 1, perEvent: true, applies: () => true,
     },
-  }));
+    {
+      ruleId: 'MOCK_TOTAL', ruleName: '登録数をできるだけ均等にする',
+      limit: perStudentLimit, perEvent: false, applies: () => true,
+    },
+  ];
 }
 
 function studentIdMappings(
