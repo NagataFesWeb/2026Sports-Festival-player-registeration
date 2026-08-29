@@ -5,6 +5,7 @@ export {
   deleteDevelopmentWorkbookData,
   prepareRealFormTestData,
   editSubmissionItem,
+  importCorrectionSlots,
   getDashboardData,
   getSubmissionDetail,
   openIssueLocation,

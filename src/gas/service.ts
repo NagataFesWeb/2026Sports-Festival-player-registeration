@@ -4,6 +4,11 @@ import { buildParticipationWarnings } from '../core/participation';
 import { clearApprovalCandidates, countReviewQueue } from '../core/dashboard';
 import { toClientSafe } from '../core/client-transfer';
 import { affectedSubmissionIds, duplicateCandidates } from '../core/duplicate-selection';
+import {
+  buildCorrectionOverlap,
+  openCorrectionsFor,
+  openInitialFor,
+} from '../core/correction-comparison';
 import { reviewSubmission } from '../core/submission-review';
 import { isDevelopmentMockSubmissionId } from '../core/mock-data-lifecycle';
 import {
@@ -23,14 +28,17 @@ import {
   type SubmissionAction
 } from '../core/workflow';
 import type {
+  CorrectionOverlap,
   DashboardFilter,
   GlobalWarning,
+  Registration,
   Submission,
   SubmissionDetail,
   SubmissionItem,
   SubmissionStatus,
   SubmissionSummary,
   Student,
+  ValidationContext,
   ValidationResult
 } from '../shared/types';
 import { ITEM_HEADERS, SCRIPT_PROPERTIES, SHEETS, SUBMISSION_HEADERS } from '../shared/constants';
@@ -60,6 +68,7 @@ import {
   readStudents,
   readSubmissions,
   removeFailedApprovalRow,
+  removeFailedChangeHistoryRow,
   resetApprovalHistory,
   replaceIssues,
   replaceIssuesForSubmissions,
@@ -101,6 +110,11 @@ export interface DashboardData {
   submissions: SubmissionSummary[];
   globalWarnings: GlobalWarning[];
   environment: DashboardEnvironment;
+  /**
+   * 疑似データを作った直後だけ入る、担当者への連絡事項。
+   * 満たせなかったルールと、意図的なエラー・警告をどう作ったかを入れる。
+   */
+  mockGenerationNotices?: string[];
 }
 
 export interface ActionResult {
@@ -129,6 +143,14 @@ export interface DuplicateSelectionResult {
 export interface BulkApprovalResult {
   approvedCount: number;
   skippedCount: number;
+  message: string;
+}
+
+export interface CorrectionImportResult {
+  targetSubmissionId: string;
+  importedCount: number;
+  /** 取り込みきったので修正申請を閉じたか。 */
+  closedCorrection: boolean;
   message: string;
 }
 
@@ -198,7 +220,7 @@ export function initializeDevelopmentWorkbookData(): DashboardData {
   resetApprovalHistory();
   const result = revalidateAllSubmissions();
   writeDashboard(result);
-  return result;
+  return generated.notices.length > 0 ? { ...result, mockGenerationNotices: generated.notices } : result;
 }
 
 export function prepareMockDataSettings(): ReturnType<typeof readMockDataSettings> {
@@ -262,7 +284,8 @@ export function addDevelopmentMockCorrectionSubmissions(count: number): Addition
     return {
       addedCount: generated.submissions.length,
       pendingCount: dashboard.pending,
-      message: `既存データを残したまま、疑似の修正申請を${generated.submissions.length}件追加しました。`,
+      message: `既存データを残したまま、疑似の修正申請を${generated.submissions.length}件追加しました。`
+        + (generated.notices.length > 0 ? `\n\n${generated.notices.join('\n')}` : ''),
     };
   } catch (error) {
     if (snapshotsReady) {
@@ -320,10 +343,12 @@ export function revalidateAllSubmissions(): DashboardData {
   const checkedSubmissions = submissions.map((submission) => {
     const items = allItems.filter((item) => item.submissionId === submission.submissionId);
     const sameClassInitialSubmissionCount = duplicateCandidates(submissions, submission).length;
+    const overlappingSubmission = overlapContextFor(submission, submissions, allItems);
     const validation = validateSubmission(submission, items, {
       students,
       sameClassInitialSubmissionCount,
       rules,
+      ...(overlappingSubmission ? { overlappingSubmission } : {}),
     });
     normalizedItems.push(...validation.normalizedItems);
     issues.push(...validation.issues);
@@ -368,6 +393,7 @@ export function revalidateAffectedSubmissions(submissionIds: string[]): Dashboar
           students,
           sameClassInitialSubmissionCount: duplicateCandidates(submissions, submission).length,
           rules,
+          ...overlapContextArgument(overlapContextFor(submission, submissions, allItems)),
         },
       );
       normalizedItems.push(...validation.normalizedItems);
@@ -497,14 +523,17 @@ export function getSubmissionDetail(submissionId: string): SubmissionDetail {
   // フォームは学籍番号だけを受け取るので、確認画面へは名簿から引いた氏名と性別を添える。
   // 性別は男女別ルールの判定根拠になるため、名簿に無い学籍番号は論理式の`UNKNOWN`と
   // 同じ扱いで`U`を返す。
-  const studentById = new Map(readStudents().map((student) => [student.studentId, student]));
+  const students = readStudents();
+  const studentById = new Map(students.map((student) => [student.studentId, student]));
   const withMasterName = (item: SubmissionItem): SubmissionItem => {
     const student = studentById.get(normalizeStudentId(item.studentIdInput));
     return { ...item, masterName: student?.name ?? '', masterGender: student?.gender ?? 'U' };
   };
   const detailItems = allItems.filter((item) => item.submissionId === submissionId)
     .map(withMasterName);
-  const detailIssues = readIssues().filter((issue) => issue.submissionId === submissionId);
+  const allIssues = readIssues();
+  const detailIssues = allIssues.filter((issue) => issue.submissionId === submissionId);
+  const allSubmissions = readSubmissions();
   return toClientSafe({
     submission,
     items: detailItems,
@@ -513,12 +542,212 @@ export function getSubmissionDetail(submissionId: string): SubmissionDetail {
       action: record.action, actorEmail: record.actorEmail, reason: record.reason, actedAt: record.actedAt,
     })),
     responseNote,
-    duplicateCandidates: duplicateCandidates(readSubmissions(), submission).map((candidate) => ({
+    duplicateCandidates: duplicateCandidates(allSubmissions, submission).map((candidate) => ({
       submission: candidate,
       items: allItems.filter((item) => item.submissionId === candidate.submissionId).map(withMasterName),
     })),
     review: reviewSubmission(detailItems, detailIssues),
+    ...correctionOverlapArgument({
+      submission, allItems, allIssues, allSubmissions, students, withMasterName,
+    }),
   });
+}
+
+interface DetailOverlapInput {
+  submission: Submission;
+  allItems: SubmissionItem[];
+  allIssues: ReturnType<typeof readIssues>;
+  allSubmissions: Submission[];
+  students: Student[];
+  withMasterName: (item: SubmissionItem) => SubmissionItem;
+}
+
+/**
+ * 突き合わせ表を作る。修正申請からは「まだ登録していない登録申請」または「登録済みの内容」と、
+ * 登録申請からは「あとから届いた修正申請」と比べる。無ければ項目自体を付けない。
+ */
+function correctionOverlapArgument(
+  input: DetailOverlapInput,
+): { correctionOverlap: CorrectionOverlap } | Record<string, never> {
+  const overlap = buildDetailCorrectionOverlap(input);
+  return overlap ? { correctionOverlap: overlap } : {};
+}
+
+function buildDetailCorrectionOverlap(input: DetailOverlapInput): CorrectionOverlap | undefined {
+  const { submission, allItems, allIssues, students, withMasterName } = input;
+  const submissions = input.allSubmissions;
+  const itemsOf = (id: string): SubmissionItem[] =>
+    allItems.filter((item) => item.submissionId === id).map(withMasterName);
+  const issuesOf = (id: string): ReturnType<typeof readIssues> =>
+    allIssues.filter((issue) => issue.submissionId === id);
+  const staleMessage = PropertiesService.getDocumentProperties()
+    .getProperty(SCRIPT_PROPERTIES.rosterRebuildRequired) ?? '';
+
+  const pairs: Array<{ correction: Submission; base?: Submission }> =
+    submission.submissionType === 'CORRECTION'
+      ? [{ correction: submission, ...withBase(openInitialFor(submissions, submission)) }]
+      : openCorrectionsFor(submissions, submission)
+        .map((correction) => ({ correction, base: submission }));
+
+  // 登録データは、登録済みのクラスと突き合わせるときだけ読む。
+  let registrations: Registration[] | undefined;
+  for (const pair of pairs) {
+    if (!pair.base && !registrations) registrations = readRegistrations();
+    const overlap = buildCorrectionOverlap({
+      correction: pair.correction,
+      correctionItems: itemsOf(pair.correction.submissionId),
+      ...(pair.base
+        ? {
+          base: {
+            submission: pair.base,
+            items: itemsOf(pair.base.submissionId),
+            issues: issuesOf(pair.base.submissionId),
+          },
+        }
+        : {}),
+      registrations: registrations ?? [],
+      students,
+      registrationStaleMessage: staleMessage,
+    });
+    if (overlap) return overlap;
+  }
+  return undefined;
+}
+
+function withBase(base: Submission | undefined): { base?: Submission } {
+  return base ? { base } : {};
+}
+
+/**
+ * 修正申請の枠を、まだ登録されていない登録申請へ取り込む。
+ * 取り込む枠は担当者が選ぶ。取り込まなかった枠は登録申請の内容のまま残る。
+ * 食い違いがすべて無くなったら、その修正申請は取り込み済みとして閉じる。
+ */
+export function importCorrectionSlots(
+  correctionSubmissionId: string,
+  targetSubmissionId: string,
+  correctionItemIds: string[],
+  reason: string,
+): CorrectionImportResult {
+  const lock = LockService.getDocumentLock();
+  if (!lock.tryLock(15_000)) {
+    throw new Error('ほかの担当者が処理中です。少し待ってから、もう一度操作してください。');
+  }
+  const restoreItems: SubmissionItem[] = [];
+  const historyRows: number[] = [];
+  let closedCorrection = false;
+  let correctionBefore: Submission | undefined;
+  let importedCount = 0;
+  let keptCount = 0;
+  try {
+    const actorEmail = assertAuthorized();
+    if (reason.trim() === '') {
+      throw new Error('取り込む理由を入力してください。どの申請の内容を採用したか後から確認できるようにします。');
+    }
+    const correction = findSubmission(correctionSubmissionId);
+    const target = findSubmission(targetSubmissionId);
+    if (!correction || !target) throw new Error('取り込む申請が見つかりません。一覧を開き直してください。');
+    if (correction.submissionType !== 'CORRECTION' || target.submissionType !== 'INITIAL') {
+      throw new Error('取り込みは、修正申請から登録申請へだけ行えます。');
+    }
+    if (correction.targetGrade !== target.targetGrade || correction.targetClass !== target.targetClass) {
+      throw new Error('学年・クラスが違う申請どうしは取り込めません。');
+    }
+    if (!REVIEWABLE.includes(correction.status) || !REVIEWABLE.includes(target.status)) {
+      throw new Error('どちらかの申請が確認できる状態ではありません。一覧を開き直してください。');
+    }
+    assertMockRosterSourceConsistent([correction, target]);
+    const selected = new Set(correctionItemIds.filter(Boolean));
+    if (selected.size === 0) throw new Error('取り込む枠を1つ以上選んでください。');
+
+    const allItems = readItems();
+    const itemsOf = (id: string): SubmissionItem[] =>
+      allItems.filter((item) => item.submissionId === id);
+    const overlap = buildCorrectionOverlap({
+      correction,
+      correctionItems: itemsOf(correctionSubmissionId),
+      base: {
+        submission: target,
+        items: itemsOf(targetSubmissionId),
+        issues: readIssues().filter((issue) => issue.submissionId === targetSubmissionId),
+      },
+      registrations: [],
+      students: readStudents(),
+    });
+    if (!overlap) throw new Error('突き合わせできる枠がありません。申請を再検査してください。');
+    const targets = overlap.rows.filter((row) =>
+      selected.has(row.correctionItemId) && row.baseItemId !== '' && row.changed);
+    if (targets.length === 0) {
+      throw new Error('選んだ枠は登録申請と同じ内容です。取り込む必要はありません。');
+    }
+
+    const historyNameById = new Map(readStudents().map((student) => [student.studentId, student.name]));
+    for (const row of targets) {
+      const before = findItem(row.baseItemId);
+      if (!before) throw new Error('取り込み先の選手枠が見つかりません。詳細を開き直してください。');
+      restoreItems.push(before);
+      const after = updateItemInput(row.baseItemId, row.correctionStudentId, row.correctionState);
+      historyRows.push(appendChangeHistory({
+        changeId: Utilities.getUuid(),
+        submissionId: targetSubmissionId,
+        submissionItemId: row.baseItemId,
+        beforeStudentId: before.studentIdInput,
+        afterStudentId: after.studentIdInput,
+        beforeStudentName: historyNameById.get(normalizeStudentId(before.studentIdInput)) ?? before.studentNameInput,
+        afterStudentName: historyNameById.get(normalizeStudentId(after.studentIdInput)) ?? after.studentNameInput,
+        beforeRegistrationState: before.registrationState,
+        afterRegistrationState: after.registrationState,
+        reason: `修正申請${correctionSubmissionId}から取り込み：${reason.trim()}`,
+        actorEmail,
+        changedAt: new Date().toISOString(),
+      }));
+      importedCount += 1;
+    }
+
+    // 取り込みが終わったら、この修正申請は必ず閉じる。
+    // 開いたまま残すと、登録申請を承認したあとにこの修正申請だけを承認できてしまい、
+    // 「登録申請のまま残す」と決めた枠が競技ごと上書きされる。もう一度使うときは却下済みから戻す。
+    const remaining = buildCorrectionOverlap({
+      correction,
+      correctionItems: itemsOf(correctionSubmissionId),
+      base: { submission: target, items: readItems().filter((item) => item.submissionId === targetSubmissionId), issues: [] },
+      registrations: [],
+      students: [],
+    });
+    keptCount = remaining?.changedCount ?? 0;
+    correctionBefore = correction;
+    updateSubmission({ ...correction, status: 'REJECTED' });
+    appendApproval({
+      approvalId: Utilities.getUuid(), submissionId: correctionSubmissionId,
+      action: '登録申請へ取り込み済み', actorEmail,
+      reason: `内容を登録申請${targetSubmissionId}へ取り込みました。取り込んだ枠${importedCount}件／登録申請のまま残した枠${keptCount}件。${reason.trim()}`,
+      actedAt: new Date().toISOString(),
+    });
+    closedCorrection = true;
+  } catch (error) {
+    restoreItems.reverse().forEach((item) => {
+      try { updateItemInput(item.submissionItemId, item.studentIdInput, item.registrationState); }
+      catch { /* 元のエラーを優先する。 */ }
+    });
+    historyRows.reverse().forEach((row) => {
+      try { removeFailedChangeHistoryRow(row); } catch { /* 元のエラーを優先する。 */ }
+    });
+    if (correctionBefore) {
+      try { updateSubmission(correctionBefore); } catch { /* 元のエラーを優先する。 */ }
+    }
+    throw error;
+  } finally {
+    lock.releaseLock();
+  }
+  revalidateAffectedSubmissions([targetSubmissionId, correctionSubmissionId]);
+  return {
+    targetSubmissionId,
+    importedCount,
+    closedCorrection,
+    message: `${importedCount}枠を登録申請へ取り込みました。`
+      + (keptCount > 0 ? `残り${keptCount}枠は登録申請の内容のままです。` : '')
+      + 'この修正申請は取り込み済みとして閉じました。もう一度使う場合は、却下済みから確認待ちへ戻してください。',
+  };
 }
 
 export function selectDuplicateSubmission(selectedSubmissionId: string): DuplicateSelectionResult {
@@ -591,6 +820,8 @@ export function approveAllClearSubmissions(): BulkApprovalResult {
           students,
           sameClassInitialSubmissionCount: duplicateCandidates(submissions, candidate).length,
           rules,
+          // 突き合わせ待ちの申請は警告が付くので、まとめて承認の対象から外れる。
+          ...overlapContextArgument(overlapContextFor(candidate, submissions, allItems)),
         },
       );
       if (validation.warningCount > 0 || validation.errorCount > 0 || validation.nextStatus !== 'PENDING_APPROVAL') {
@@ -765,6 +996,14 @@ export function performSubmissionAction(
       issue.submissionId === submissionId && issue.issueCode === ISSUE_CODES.MULTIPLE_INITIAL_SUBMISSIONS)) {
       throw new Error('同じクラスの回答が複数あります。先に回答を比較し、採用する1件を選んでください。');
     }
+    // 修正申請を単独で承認すると、まだ登録されていない登録申請の競技が登録されないまま残る。
+    // 取り込み済みの修正申請は閉じてあるので、ここへは来ない。
+    if (action === 'APPROVE' && submission.submissionType === 'CORRECTION') {
+      const openInitial = openInitialFor(readSubmissions(), submission);
+      if (openInitial) {
+        throw new Error(`同じクラスの登録申請（${openInitial.submissionId}）がまだ登録されていません。先に「登録申請と修正申請の突き合わせ」で内容を取り込むか、登録申請を処理してから承認してください。`);
+      }
+    }
     const validationTarget = action === 'RESUME'
       ? { ...submission, receptionOpen: true }
       : action === 'RESTORE' || action === 'REOPEN_APPROVED'
@@ -842,6 +1081,41 @@ export function performSubmissionAction(
   }
 }
 
+/**
+ * 同じクラスの、まだ登録されていない相手の申請と枠が食い違っているかを調べる。
+ * 登録申請から見れば「あとから届いた修正申請」、修正申請から見れば「まだ登録していない登録申請」。
+ */
+function overlapContextFor(
+  submission: Submission,
+  submissions: Submission[],
+  allItems: SubmissionItem[],
+): ValidationContext['overlappingSubmission'] {
+  const partners = submission.submissionType === 'CORRECTION'
+    ? [openInitialFor(submissions, submission)].filter(Boolean) as Submission[]
+    : openCorrectionsFor(submissions, submission);
+  const itemsOf = (id: string): SubmissionItem[] =>
+    allItems.filter((item) => item.submissionId === id);
+  for (const partner of partners) {
+    const correction = submission.submissionType === 'CORRECTION' ? submission : partner;
+    const base = submission.submissionType === 'CORRECTION' ? partner : submission;
+    const overlap = buildCorrectionOverlap({
+      correction,
+      correctionItems: itemsOf(correction.submissionId),
+      base: { submission: base, items: itemsOf(base.submissionId), issues: [] },
+      registrations: [],
+      students: [],
+    });
+    if (!overlap || overlap.changedCount === 0) continue;
+    return {
+      submissionId: partner.submissionId,
+      submissionType: partner.submissionType,
+      submittedAt: partner.submittedAt,
+      changedSlotCount: overlap.changedCount,
+    };
+  }
+  return undefined;
+}
+
 function revalidateOne(submission: Submission): ValidationResult {
   const allSubmissions = readSubmissions().map((candidate) =>
     candidate.submissionId === submission.submissionId ? submission : candidate);
@@ -852,8 +1126,16 @@ function revalidateOne(submission: Submission): ValidationResult {
       students: readStudents(),
       sameClassInitialSubmissionCount: duplicateCandidates(allSubmissions, submission).length,
       rules: readRuleSettings(),
+      ...overlapContextArgument(overlapContextFor(submission, allSubmissions, readItems())),
     }
   );
+}
+
+/** `exactOptionalPropertyTypes`のため、値があるときだけ項目を足す。 */
+function overlapContextArgument(
+  overlappingSubmission: ValidationContext['overlappingSubmission'],
+): Pick<ValidationContext, 'overlappingSubmission'> | Record<string, never> {
+  return overlappingSubmission ? { overlappingSubmission } : {};
 }
 
 function actionMessage(action: SubmissionAction): string {

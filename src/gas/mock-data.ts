@@ -1,4 +1,10 @@
 import { convertFormAnswer } from '../core/form-response';
+import {
+  assignMockStudents,
+  findRuleViolationCandidates,
+  type MockAssignmentInput,
+  type MockSlot,
+} from '../core/mock-assignment';
 import { appliesToGrade, buildCorrectionSections, type CorrectionSection } from '../core/settings';
 import { ISSUE_CODES, validateSubmission } from '../core/validation';
 import type {
@@ -27,15 +33,44 @@ export interface MockSubmissions {
   submissions: Submission[];
   items: SubmissionItem[];
   rawResponses: RawFormResponseRecord[];
+  /**
+   * 疑似データは作ったうえで、担当者へ知らせること。
+   * 満たせなかったルールと、意図的なエラー・警告をどう作ったかを入れる。
+   */
+  notices: string[];
 }
+
+/** 意図的に作る問題の指定。 */
+interface ProblemIntent {
+  kind: 'ERROR' | 'WARNING';
+  /** 何件目か。ルールを順番に切り替えて、同じルールばかり壊さないようにする。 */
+  sequence: number;
+}
+
+/** 枠（`競技ID:枠番号`）ごとの学籍番号。同じクラスの通常回答と修正回答をそろえるために使う。 */
+type SlotAssignmentMap = Map<string, string>;
 
 interface ScenarioResult {
   submission: Submission;
   items: SubmissionItem[];
   rawResponse: RawFormResponseRecord;
+  /**
+   * この回答で埋めた枠と学籍番号。意図的な問題を入れる前の内容。
+   * 同じクラスの修正回答へそろえるために使うので、わざと入れた誤りは含めない。
+   */
+  slotAssignments: SlotAssignmentMap;
+  /** 満たせなかったルールなど、そのまま担当者へ伝えること。 */
+  notices: string[];
+  /** 意図的な問題をどの方法で作ったか。空なら意図的な問題なし。 */
+  problemLabel: string;
 }
 
 type AnswerMutator = (answers: Record<string, string>, studentIdKeys: string[]) => void;
+
+/** 知らせる内容を並べる最大件数。これを超えた分は件数だけ知らせる。 */
+const MAX_LISTED_MOCK_NOTICES = 20;
+/** 意図的な問題を作るときに、実際に検査して確かめる差し替え案の数。 */
+const VIOLATION_TRIAL_LIMIT = 6;
 
 /** 現在の生成フォームの項目対応表から、疑似フォーム回答と承認待ちデータを作る。 */
 export function generateMockSubmissions(
@@ -90,53 +125,84 @@ export function generateMockSubmissions(
     makeScenario(source, 'mock-response-05', 'normal', normalGrade, 1, true),
   ];
 
+  return collectScenarios(scenarios, []);
+}
+
+function collectScenarios(scenarios: ScenarioResult[], extraNotices: string[]): MockSubmissions {
+  const notices = [...scenarios.flatMap((scenario) => scenario.notices), ...extraNotices]
+    .filter((notice, index, all) => all.indexOf(notice) === index);
   return {
     submissions: scenarios.map((scenario) => scenario.submission),
     items: scenarios.flatMap((scenario) => scenario.items),
     rawResponses: scenarios.map((scenario) => scenario.rawResponse),
+    notices: notices.length > MAX_LISTED_MOCK_NOTICES
+      ? [...notices.slice(0, MAX_LISTED_MOCK_NOTICES),
+        `（ほか${notices.length - MAX_LISTED_MOCK_NOTICES}件あります。）`]
+      : notices,
   };
 }
 
-function assertConfiguredScenariosMatchRequestedProblems(
+/**
+ * 作った疑似データが指定どおりかを確かめ、違っていたら知らせる文を返す。
+ * ここでは止めない。指定どおりでなくても、疑似データは作って渡す。
+ */
+function reviewConfiguredScenarios(
   source: MockFormSource,
   scenarios: ScenarioResult[],
   config: MockDataGenerationConfig,
-): void {
+): string[] {
+  const notices: string[] = [];
   scenarios.forEach((scenario, index) => {
     const validation = validateSubmission(scenario.submission, scenario.items, {
       students: source.students,
       sameClassInitialSubmissionCount: 1,
       ...(source.rules ? { rules: source.rules } : {}),
     });
-    const expectedCodes = index < config.errorSubmissionCount
-      ? new Set([configuredErrorCode(source, index)])
+    const intent = index < config.errorSubmissionCount
+      ? 'ERROR'
       : index < config.errorSubmissionCount + config.warningSubmissionCount
-        ? new Set([ISSUE_CODES.PROXY_SUBMISSION])
-        : new Set<string>();
-    validation.issues
-      .filter((issue) => issue.issueCode === ISSUE_CODES.VACANCY_CAPACITY_SHORTFALL)
-      .forEach((issue) => expectedCodes.add(issue.issueCode));
-    const unexpected = validation.issues.filter((issue) => !expectedCodes.has(issue.issueCode));
-    const missingExpected = [...expectedCodes].filter((code) =>
-      !validation.issues.some((issue) => issue.issueCode === code));
-    if (unexpected.length === 0 && missingExpected.length === 0) return;
-    const problem = unexpected[0];
-    const target = `${scenario.submission.targetGrade}年${scenario.submission.targetClass}組`;
-    if (problem?.issueCode === ISSUE_CODES.RULE_EXPRESSION_FALSE) {
-      throw new Error(
-        `疑似データを作成する前の点検で、${target}がルール設定の論理式を満たせませんでした。${problem.displayTitle}。競技設定の必要人数と、ルール設定の論理式・対象競技を確認してください。疑似データは書き換えていません。`,
-      );
+        ? 'WARNING'
+        : 'CLEAN';
+    const target = `${scenario.submission.targetGrade}年${scenario.submission.targetClass}組`
+      + `（疑似申請${index + 1}件目）`;
+    if (intent === 'ERROR' && validation.errorCount === 0) {
+      notices.push(`${target}：エラーを1件出すつもりでしたが、エラーになりませんでした。`);
+      return;
     }
-    throw new Error(
-      `疑似データを作成する前の点検で、${target}に指定していない問題が見つかりました。${problem?.displayTitle ?? '指定した問題を再現できません'}。ルール設定と競技設定を確認してください。疑似データは書き換えていません。`,
-    );
+    if (intent === 'WARNING' && validation.warningCount === 0) {
+      notices.push(`${target}：警告を1件出すつもりでしたが、警告になりませんでした。`);
+      return;
+    }
+    if (intent === 'CLEAN') {
+      validation.issues
+        .filter((issue) => issue.severity === 'ERROR')
+        .forEach((issue) => notices.push(describeUnexpectedIssue(target, issue)));
+    }
+    if (intent === 'WARNING' && validation.errorCount > 0) {
+      validation.issues
+        .filter((issue) => issue.severity === 'ERROR')
+        .forEach((issue) => notices.push(
+          `${target}：警告だけにするつもりでしたが、エラーも出ています。${describeUnexpectedIssue(target, issue)}`,
+        ));
+    }
   });
+  return notices;
 }
 
-/** 学籍番号の検査は常時エラーなので、疑似データは2種類の誤りを交互に作る。 */
-function configuredErrorCode(source: MockFormSource, index: number): string {
-  void source;
-  return index % 2 === 0
+function describeUnexpectedIssue(target: string, issue: { locationText: string; displayTitle: string; currentValue: string; fixInstruction: string; issueCode: string }): string {
+  return [
+    `${target}`,
+    `どこ：${issue.locationText}`,
+    `内容：${issue.displayTitle}`,
+    `いまの集計：${issue.currentValue}`,
+    `直し方：${issue.fixInstruction}`,
+    `検査コード：${issue.issueCode}`,
+  ].join(' ／ ');
+}
+
+/** 意図的なエラーで使う、ルールに関係しない誤り。ルールを壊せないときの受け皿。 */
+function fallbackErrorCode(sequence: number): string {
+  return sequence % 2 === 0
     ? ISSUE_CODES.STUDENT_ID_INVALID
     : ISSUE_CODES.STUDENT_CLASS_MISMATCH;
 }
@@ -170,6 +236,7 @@ function generateConfiguredMockSubmissions(
   }
 
   const scenarios: ScenarioResult[] = [];
+  const assignmentsByClass = new Map<string, SlotAssignmentMap>();
   const formTypes = new Set(config.targetFormTypes);
   // 通常フォームはクラス単位の初回登録なので、意図しない重複回答を作らない。
   // 修正フォームも選ばれている場合だけ、指定件数まで修正回答を追加する。
@@ -193,49 +260,53 @@ function generateConfiguredMockSubmissions(
     const correctionSection = formType === 'correction'
       ? correctionSections[classOccurrence % correctionSections.length]
       : undefined;
-    const isError = index < config.errorSubmissionCount;
+    const classKey = `${grade}-${classNumber}`;
     const warningIndex = index - config.errorSubmissionCount;
-    const isWarning = warningIndex >= 0 && warningIndex < config.warningSubmissionCount;
-    const receptionOpen = true;
-    const mutate: AnswerMutator | undefined = isError
-      ? (answers, keys): void => {
-        const key = keys[0]!;
-        if (configuredErrorCode(source, index) === ISSUE_CODES.STUDENT_ID_INVALID) {
-          answers[key] = '9999';
-        } else {
-          const otherClass = classNumber === 8 ? 7 : classNumber + 1;
-          const other = studentAt(source.students, grade, otherClass, 1);
-          answers[key] = other.studentId;
-        }
-      }
-      : isWarning
-        ? (answers, keys): void => {
-          void keys;
-          const otherClass = classNumber === 1 ? 2 : 1;
-          const proxy = studentAt(source.students, grade, otherClass, 1);
-          answers.submitter_student_id = proxy.studentId;
-          answers.submitter_name_input = proxy.name;
-          answers.is_proxy = '別のクラスを代理で入力';
-        }
+    const problem: ProblemIntent | undefined = index < config.errorSubmissionCount
+      ? { kind: 'ERROR', sequence: index }
+      : warningIndex >= 0 && warningIndex < config.warningSubmissionCount
+        ? { kind: 'WARNING', sequence: warningIndex }
         : undefined;
-    scenarios.push(makeScenario(
+    const scenario = makeScenario(
       source,
       `mock-response-${String(startSequence + index).padStart(6, '0')}`,
       formType,
       grade,
       classNumber,
-      receptionOpen,
-      mutate,
+      true,
+      undefined,
       correctionSection,
       classOccurrence,
-    ));
+      problem,
+      // 同じクラスの通常回答があるなら、重なる枠は同じ選手にそろえる。
+      // そろえないと「まだ登録していない登録申請と食い違っています」の警告が全件に付く。
+      formType === 'correction' ? assignmentsByClass.get(classKey) : undefined,
+    );
+    if (formType === 'normal') assignmentsByClass.set(classKey, scenario.slotAssignments);
+    scenarios.push(scenario);
   }
-  assertConfiguredScenariosMatchRequestedProblems(source, scenarios, config);
-  return {
-    submissions: scenarios.map((scenario) => scenario.submission),
-    items: scenarios.flatMap((scenario) => scenario.items),
-    rawResponses: scenarios.map((scenario) => scenario.rawResponse),
-  };
+  const overlapNotice = formTypes.size === 2 && config.errorSubmissionCount + config.warningSubmissionCount > 0
+    ? ['通常フォームと修正フォームの両方を選んだので、同じクラスに登録申請と修正申請が並びます。'
+      + '意図的な問題を入れたクラスは内容が食い違うため、両方の申請へ「まだ登録していない同じクラスの申請と、同じ枠が重なっています」の警告が付きます。'
+      + '申請を開くと「登録申請と修正申請の突き合わせ」が出るので、そのまま取り込みを試せます。']
+    : [];
+  return collectScenarios(scenarios, [
+    ...summarizeProblemLabels(scenarios),
+    ...overlapNotice,
+    ...reviewConfiguredScenarios(source, scenarios, config),
+  ]);
+}
+
+/** 意図的な問題をどのルールで作ったかを1行にまとめる。 */
+function summarizeProblemLabels(scenarios: ScenarioResult[]): string[] {
+  const counts = new Map<string, number>();
+  scenarios
+    .filter((scenario) => scenario.problemLabel)
+    .forEach((scenario) => counts.set(scenario.problemLabel, (counts.get(scenario.problemLabel) ?? 0) + 1));
+  if (counts.size === 0) return [];
+  return ['意図的な問題の作り方：' + [...counts.entries()]
+    .map(([label, count]) => `${label}（${count}件）`)
+    .join('、')];
 }
 
 /**
@@ -266,6 +337,8 @@ function makeScenario(
   mutate?: AnswerMutator,
   correctionSection?: CorrectionSection,
   studentOffset = 0,
+  problem?: ProblemIntent,
+  reuse?: SlotAssignmentMap,
 ): ScenarioResult {
   const registry = formType === 'normal' ? source.normalRegistry : source.correctionRegistry;
   const formId = formType === 'normal' ? source.normalFormId : source.correctionFormId;
@@ -289,30 +362,69 @@ function makeScenario(
     is_proxy: '自分のクラスを入力',
   };
   if (formType === 'correction') answers.correction_event_id = correctionSection?.choice ?? '';
-  const assignedStudents = assignStudentsWithoutRuleViolations(
-    source, mappings, classStudents, studentOffset, grade, classNumber,
-  );
-  mappings.forEach((mapping, index) => {
-    const student = assignedStudents[index];
+
+  const slots = mappings.map<MockSlot>((mapping) => {
+    const event = source.events.find((candidate) => candidate.eventId === mapping.eventId);
     const stateKey = mapping.fieldKey.replace(/_student_id$/, '_state');
-    if (student) {
-      answers[mapping.fieldKey] = student.studentId;
-      if (registryKeys.has(stateKey)) answers[stateKey] = '選手を登録する';
-    } else {
-      answers[mapping.fieldKey] = '';
-      if (registryKeys.has(stateKey)) answers[stateKey] = '出場しない';
-    }
+    return {
+      eventId: mapping.eventId,
+      eventName: event?.eventName ?? mapping.eventId,
+      required: !registryKeys.has(stateKey),
+      vacancyAllowed: Boolean(event?.vacancyAllowed),
+    };
   });
-  const allStudentIdKeys = mappings.map((mapping) => mapping.fieldKey);
-  const populatedStudentIdKeys = allStudentIdKeys.filter((key) => answers[key]);
-  const studentIdKeys = populatedStudentIdKeys.length > 0 ? populatedStudentIdKeys : allStudentIdKeys;
-  mutate?.(answers, studentIdKeys);
+  assertClassCanFillEvents(slots, classStudents.length, grade, classNumber);
+  const assignmentInput: MockAssignmentInput = {
+    slots,
+    classStudents,
+    students: source.students,
+    rules: source.rules ?? [],
+    grade,
+    classNumber,
+    studentOffset,
+  };
+  const assignment = assignMockStudents(assignmentInput);
+  const notices = assignment.unsatisfiedRules.map((rule) =>
+    `${grade}年${classNumber}組：ルールを満たす割り当てが見つかりませんでした。${rule}`);
+  const slotKeys = mappings.map((mapping) => slotAssignmentKey(mapping));
+  // 同じクラスの通常回答で決まっている枠は、その選手をそのまま使う。
+  const studentIds = assignment.studentIds.map((studentId, index) =>
+    reuse?.get(slotKeys[index] ?? '') ?? studentId);
+
+  const applyStudentIds = (studentIds: readonly string[]): void => {
+    mappings.forEach((mapping, index) => {
+      const studentId = studentIds[index] ?? '';
+      const stateKey = mapping.fieldKey.replace(/_student_id$/, '_state');
+      answers[mapping.fieldKey] = studentId;
+      if (registryKeys.has(stateKey)) {
+        answers[stateKey] = studentId ? '選手を登録する' : '出場しない';
+      }
+    });
+  };
+  applyStudentIds(studentIds);
+
   const submittedAt = new Date(Date.UTC(source.year, 6, 1, 0, Number(responseId.slice(-2)) || 1)).toISOString();
-  const converted = convertFormAnswer({
+  const convert = (): ReturnType<typeof convertFormAnswer> => convertFormAnswer({
     formId, responseId, formType, submittedAt,
     respondentEmail: `mock-${grade}${classNumber}@example.invalid`, receptionOpen,
     answersByFieldKey: answers, registry, events: source.events,
   });
+
+  let problemLabel = '';
+  if (problem) {
+    problemLabel = applyIntentionalProblem({
+      source, problem, assignmentInput, studentIds,
+      mappings, answers, registryKeys, convert, grade, classNumber,
+      applyStudentIds,
+    });
+  }
+
+  const allStudentIdKeys = mappings.map((mapping) => mapping.fieldKey);
+  const populatedStudentIdKeys = allStudentIdKeys.filter((key) => answers[key]);
+  const studentIdKeys = populatedStudentIdKeys.length > 0 ? populatedStudentIdKeys : allStudentIdKeys;
+  mutate?.(answers, studentIdKeys);
+
+  const converted = convert();
   return {
     ...converted,
     rawResponse: {
@@ -320,134 +432,122 @@ function makeScenario(
       processingStatus: 'PROCESSED', submissionId: converted.submission.submissionId,
       processedAt: submittedAt, errorCode: '',
     },
+    notices,
+    problemLabel,
+    slotAssignments: new Map(slotKeys
+      .map((key, index) => [key, studentIds[index] ?? ''] as const)
+      .filter(([key, studentId]) => key !== '' && studentId !== '')),
   };
 }
 
-interface MockDuplicateRule {
-  ruleId: string;
-  ruleName: string;
-  limit: number;
-  perEvent: boolean;
-  applies: (mapping: FormRegistryRow) => boolean;
+/** 通常フォームと修正フォームで同じ枠を指す鍵。項目名の`correction_`は無視する。 */
+function slotAssignmentKey(mapping: FormRegistryRow): string {
+  const slot = mapping.fieldKey.match(/_slot(\d+)_student_id$/)?.[1] ?? '';
+  return slot === '' ? '' : `${mapping.eventId}:${slot}`;
 }
 
-function assignStudentsWithoutRuleViolations(
-  source: MockFormSource,
-  mappings: FormRegistryRow[],
-  classStudents: Student[],
-  studentOffset: number,
-  grade: number,
-  classNumber: number,
-): Array<Student | undefined> {
-  const rules = mockDuplicateRules(mappings.length, classStudents.length);
-  assertMockRuleCapacity(source, rules, mappings, classStudents.length, grade, classNumber);
-  const counts = new Map<string, number>();
-  const totalByStudent = new Map<string, number>();
-  const assignments = new Map<number, Student | undefined>();
-  const orderedMappings = mappings.map((mapping, originalIndex) => ({
-    mapping,
-    originalIndex,
-    applicableRules: rules.filter((rule) => rule.applies(mapping)),
-  })).sort((left, right) =>
-    Number(eventAllowsVacancy(source, left.mapping)) - Number(eventAllowsVacancy(source, right.mapping))
-    || right.applicableRules.length - left.applicableRules.length
-    || Math.min(...left.applicableRules.map((rule) => rule.limit), Number.MAX_SAFE_INTEGER)
-      - Math.min(...right.applicableRules.map((rule) => rule.limit), Number.MAX_SAFE_INTEGER)
-    || left.originalIndex - right.originalIndex);
-  orderedMappings.forEach(({ mapping, originalIndex, applicableRules }, allocationIndex) => {
-    const rotated = classStudents.map((student, index) => ({
-      student,
-      rotationRank: (index - studentOffset - allocationIndex - 1 + classStudents.length * 2)
-        % classStudents.length,
-    })).sort((left, right) =>
-      (totalByStudent.get(left.student.studentId) ?? 0) - (totalByStudent.get(right.student.studentId) ?? 0)
-      || left.rotationRank - right.rotationRank);
-    const selected = rotated.find(({ student }) => applicableRules.every((rule) => {
-      const scope = rule.perEvent ? mapping.eventId : '対象競技全体';
-      return (counts.get(`${rule.ruleId}:${scope}:${student.studentId}`) ?? 0) < rule.limit;
-    }))?.student;
-    if (!selected) {
-      if (eventAllowsVacancy(source, mapping)) {
-        assignments.set(originalIndex, undefined);
-        return;
-      }
-      const event = source.events.find((candidate) => candidate.eventId === mapping.eventId);
-      throw new Error(
-        `${grade}年${classNumber}組の「${event?.eventName ?? mapping.eventId}」へ、重複ルールを守って疑似選手を割り当てられません。ルール設定の上限・対象競技と、競技設定の必要人数を確認してください。疑似データは書き換えていません。`,
-      );
+interface IntentionalProblemContext {
+  source: MockFormSource;
+  problem: ProblemIntent;
+  assignmentInput: MockAssignmentInput;
+  studentIds: readonly string[];
+  mappings: FormRegistryRow[];
+  answers: Record<string, string>;
+  registryKeys: Set<string>;
+  convert: () => { submission: Submission; items: SubmissionItem[] };
+  applyStudentIds: (studentIds: readonly string[]) => void;
+  grade: number;
+  classNumber: number;
+}
+
+/**
+ * 指定した判定のルールを1つ壊して、意図的なエラー・警告を作る。
+ * 実際に検査して、狙った重さ（エラーだけ／警告だけ）になった案だけを採用する。
+ * どのルールも使えないときは、ルールに関係しない誤りで代用する。
+ */
+function applyIntentionalProblem(context: IntentionalProblemContext): string {
+  const { problem, assignmentInput, studentIds, mappings, answers, registryKeys } = context;
+  const judgment: RuleSetting['judgment'] = problem.kind === 'ERROR' ? 'エラー' : '警告';
+  const candidates = findRuleViolationCandidates(
+    assignmentInput, studentIds, judgment, problem.sequence, VIOLATION_TRIAL_LIMIT,
+  );
+  for (const candidate of candidates) {
+    const mapping = mappings[candidate.slotIndex];
+    if (!mapping) continue;
+    const trial = [...studentIds];
+    trial[candidate.slotIndex] = candidate.studentId;
+    context.applyStudentIds(trial);
+    if (matchesIntent(context, problem.kind)) {
+      return `${candidate.ruleLabel} を破る（${candidate.eventName}）`;
     }
-    applicableRules.forEach((rule) => {
-      const scope = rule.perEvent ? mapping.eventId : '対象競技全体';
-      const key = `${rule.ruleId}:${scope}:${selected.studentId}`;
-      counts.set(key, (counts.get(key) ?? 0) + 1);
-    });
-    totalByStudent.set(selected.studentId, (totalByStudent.get(selected.studentId) ?? 0) + 1);
-    assignments.set(originalIndex, selected);
+  }
+  context.applyStudentIds(studentIds);
+
+  if (problem.kind === 'WARNING') {
+    const otherClass = context.classNumber === 1 ? 2 : 1;
+    const proxy = studentAt(context.source.students, context.grade, otherClass, 1);
+    answers.submitter_student_id = proxy.studentId;
+    answers.submitter_name_input = proxy.name;
+    answers.is_proxy = '別のクラスを代理で入力';
+    return matchesIntent(context, 'WARNING')
+      ? '判定=警告のルールを壊せないため、代理入力の警告で代用'
+      : '警告を作れませんでした';
+  }
+
+  const filledIndex = studentIds.findIndex((studentId) => studentId !== '');
+  const slotIndex = filledIndex >= 0 ? filledIndex : 0;
+  const key = mappings[slotIndex]?.fieldKey;
+  if (!key) return 'エラーを作れませんでした';
+  const stateKey = key.replace(/_student_id$/, '_state');
+  if (registryKeys.has(stateKey)) answers[stateKey] = '選手を登録する';
+  if (fallbackErrorCode(problem.sequence) === ISSUE_CODES.STUDENT_ID_INVALID) {
+    answers[key] = '9999';
+    return matchesIntent(context, 'ERROR')
+      ? '判定=エラーのルールを壊せないため、学籍番号の書式違反で代用'
+      : 'エラーを作れませんでした';
+  }
+  const otherClass = context.classNumber === 8 ? 7 : context.classNumber + 1;
+  answers[key] = studentAt(context.source.students, context.grade, otherClass, 1).studentId;
+  return matchesIntent(context, 'ERROR')
+    ? '判定=エラーのルールを壊せないため、別クラスの学籍番号で代用'
+    : 'エラーを作れませんでした';
+}
+
+/** いま作った回答が、狙った重さの検査結果になるかを実際に検査して確かめる。 */
+function matchesIntent(context: IntentionalProblemContext, kind: ProblemIntent['kind']): boolean {
+  const converted = context.convert();
+  const validation = validateSubmission(converted.submission, converted.items, {
+    students: context.source.students,
+    sameClassInitialSubmissionCount: 1,
+    ...(context.source.rules ? { rules: context.source.rules } : {}),
   });
-  return mappings.map((_, index) => assignments.get(index));
+  return kind === 'ERROR'
+    ? validation.errorCount >= 1
+    : validation.warningCount >= 1 && validation.errorCount === 0;
 }
 
-function eventAllowsVacancy(source: MockFormSource, mapping: FormRegistryRow): boolean {
-  return Boolean(source.events.find((event) => event.eventId === mapping.eventId)?.vacancyAllowed);
-}
-
-function assertMockRuleCapacity(
-  source: MockFormSource,
-  rules: MockDuplicateRule[],
-  mappings: FormRegistryRow[],
+/**
+ * 同じ競技へ同じ生徒は登録できないので、欠員不可の枠がクラスの人数を超えていたら作れない。
+ * これはルールの satisfiability ではなく物理的な不足なので、ここだけは止める。
+ */
+function assertClassCanFillEvents(
+  slots: MockSlot[],
   studentCount: number,
   grade: number,
   classNumber: number,
 ): void {
-  for (const rule of rules) {
-    const applicable = mappings.filter((mapping) => rule.applies(mapping));
-    const groups = new Map<string, FormRegistryRow[]>();
-    applicable.forEach((mapping) => {
-      const scope = rule.perEvent ? mapping.eventId : '対象競技全体';
-      const group = groups.get(scope) ?? [];
-      group.push(mapping);
-      groups.set(scope, group);
-    });
-    for (const [scope, group] of groups) {
-      const capacity = studentCount * rule.limit;
-      const requiredCount = group.filter((mapping) => !eventAllowsVacancy(source, mapping)).length;
-      if (requiredCount <= capacity) continue;
-      const event = sourceEventNameForCapacity(source, scope, group);
-      throw new Error(
-        `${grade}年${classNumber}組では「${rule.ruleName}」を満たせません。対象：${event}、欠員不可の登録枠${requiredCount}人分、生徒${studentCount}人、1人あたり上限${rule.limit}件のため、最大${capacity}人分です。${requiredCount - capacity}人分超えています。競技設定の必要人数またはルール設定の上限・対象競技を確認してください。疑似データは書き換えていません。`,
-      );
-    }
+  const requiredByEvent = new Map<string, { name: string; count: number }>();
+  slots.filter((slot) => !slot.vacancyAllowed).forEach((slot) => {
+    const current = requiredByEvent.get(slot.eventId) ?? { name: slot.eventName, count: 0 };
+    current.count += 1;
+    requiredByEvent.set(slot.eventId, current);
+  });
+  for (const [eventId, event] of requiredByEvent) {
+    if (event.count <= studentCount) continue;
+    throw new Error(
+      `${grade}年${classNumber}組の「${event.name}（${eventId}）」は、欠員を許可していない登録枠が${event.count}人分あるのに、クラスの生徒は${studentCount}人です。同じ競技へ同じ生徒は登録できないため、疑似データを作れません。競技設定の必要人数か欠員許可を確認してください。疑似データは書き換えていません。`,
+    );
   }
-}
-
-function sourceEventNameForCapacity(
-  source: MockFormSource,
-  scope: string,
-  mappings: FormRegistryRow[],
-): string {
-  if (scope === '対象競技全体') return 'ルールの対象競技全体';
-  const eventId = mappings[0]?.eventId ?? scope;
-  const event = source.events.find((candidate) => candidate.eventId === eventId);
-  return event ? `${event.eventName}（${eventId}）` : `${eventId}（同一競技内）`;
-}
-
-/**
- * 疑似データの割り当て方針。ルール設定の論理式は読まず、
- * 同じ競技内で同じ生徒を使わず、全体ではできるだけ均等に割り当てる。
- * 登録枠が生徒数を超えるときだけ、埋めるのに必要な回数を上限にする。
- */
-function mockDuplicateRules(slotCount: number, studentCount: number): MockDuplicateRule[] {
-  const perStudentLimit = studentCount > 0 ? Math.max(1, Math.ceil(slotCount / studentCount)) : 1;
-  return [
-    {
-      ruleId: 'MOCK_PER_EVENT', ruleName: '同じ競技内で同じ生徒を使わない',
-      limit: 1, perEvent: true, applies: () => true,
-    },
-    {
-      ruleId: 'MOCK_TOTAL', ruleName: '登録数をできるだけ均等にする',
-      limit: perStudentLimit, perEvent: false, applies: () => true,
-    },
-  ];
 }
 
 function studentIdMappings(

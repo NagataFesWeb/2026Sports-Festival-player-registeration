@@ -21,6 +21,7 @@ export const ISSUE_CODES = {
   REQUIRED_SLOT_MISSING: 'REQUIRED_SLOT_MISSING',
   VACANCY_CAPACITY_SHORTFALL: 'VACANCY_CAPACITY_SHORTFALL',
   MULTIPLE_INITIAL_SUBMISSIONS: 'MULTIPLE_INITIAL_SUBMISSIONS',
+  OVERLAPPING_SUBMISSION: 'OVERLAPPING_SUBMISSION',
   PROXY_SUBMISSION: 'PROXY_SUBMISSION',
   REGISTRATION_PENDING: 'REGISTRATION_PENDING',
   CORRECTION_WHILE_CLOSED: 'CORRECTION_WHILE_CLOSED',
@@ -64,6 +65,10 @@ const ISSUE_TEXT: Record<IssueCode, IssueText> = {
     title: '同じクラスから複数の初回回答があります',
     instruction: '各回答の内容と送信日時を確認し、採用する回答を1件選んでください。',
   },
+  OVERLAPPING_SUBMISSION: {
+    title: 'まだ登録していない同じクラスの申請と、同じ枠が重なっています',
+    instruction: '「登録申請と修正申請の突き合わせ」で両方の内容を見比べ、枠ごとにどちらを使うかを選んでください。修正申請の内容を登録申請へ取り込むと、登録申請のエラーを直したまま承認できます。',
+  },
   PROXY_SUBMISSION: {
     title: '入力者が対象クラスの代わりに入力しています',
     instruction: '画面に表示された「入力者の所属」と「登録対象クラス」が異なる場合の表示です。代理入力で間違いなければ、選手内容を確認して警告を残したまま承認できます。',
@@ -86,6 +91,14 @@ const ISSUE_TEXT: Record<IssueCode, IssueText> = {
   },
 };
 
+/**
+ * 内部の検査コードに対応する表示文言を返す。検査結果そのものを持たない場面
+ * （疑似データ作成前の点検など）で、コードだけを人が読める言葉にするために使う。
+ */
+export function issueDisplayTitle(code: string): string {
+  return ISSUE_TEXT[code as IssueCode]?.title ?? code;
+}
+
 export function validateSubmission(
   submission: Submission,
   items: SubmissionItem[],
@@ -104,7 +117,8 @@ export function validateSubmission(
     severity: Severity,
     item: SubmissionItem | undefined,
     currentValue: string,
-    override?: Partial<Pick<ValidationIssue, 'displayTitle' | 'locationText' | 'fixInstruction'>>,
+    override?: Partial<Pick<ValidationIssue,
+      'displayTitle' | 'locationText' | 'fixInstruction' | 'relatedItemIds'>>,
   ): void => {
     const text = ISSUE_TEXT[code];
     issues.push({
@@ -118,12 +132,21 @@ export function validateSubmission(
       currentValue,
       fixInstruction: override?.fixInstruction ?? text.instruction,
       status: 'UNCONFIRMED',
+      relatedItemIds: override?.relatedItemIds ?? '',
     });
   };
 
   const firstItem = normalizedItems[0];
   if (submission.submissionType === 'INITIAL' && context.sameClassInitialSubmissionCount > 1) {
     addIssue(ISSUE_CODES.MULTIPLE_INITIAL_SUBMISSIONS, 'WARNING', firstItem, `${context.sameClassInitialSubmissionCount}件`);
+  }
+  const overlap = context.overlappingSubmission;
+  if (overlap) {
+    const partnerLabel = overlap.submissionType === 'CORRECTION' ? 'あとから届いた修正申請' : 'まだ登録していない登録申請';
+    addIssue(ISSUE_CODES.OVERLAPPING_SUBMISSION, 'WARNING', undefined,
+      `${partnerLabel}（${overlap.submissionId}）と${overlap.changedSlotCount}枠が食い違っています`, {
+        locationText: '登録申請と修正申請の突き合わせ',
+      });
   }
   const submitter = studentsById.get(normalizeStudentId(submission.submitterStudentId));
   const isActualProxy = Boolean(submitter
@@ -189,7 +212,8 @@ export function validateSubmission(
   };
 }
 
-function expressionTargetItems(items: SubmissionItem[], rule: RuleSetting): SubmissionItem[] {
+/** ルールの`対象`と`対象event_id`から、そのルールが見る申請項目だけを取り出す。 */
+export function ruleTargetItems(items: SubmissionItem[], rule: RuleSetting): SubmissionItem[] {
   const eventIds = new Set(rule.targetEventIds.split(',').map((value) => value.trim()).filter(Boolean));
   return items.filter((item) => rule.target === '全競技' || eventIds.has(item.eventId)
     || (rule.target === 'リレー' && item.eventName.includes('リレー'))
@@ -247,6 +271,58 @@ function expressionValues(
   };
 }
 
+/**
+ * 対象項目に対して1つのルールの論理式が成り立つかを返す。
+ * 論理式が壊れていて判定できないときは`undefined`を返す。
+ * 疑似データ生成が検査と同じ数え方を使うための入口。
+ */
+export function ruleExpressionHolds(
+  submission: Submission,
+  targetItems: SubmissionItem[],
+  studentsById: Map<string, ValidationContext['students'][number]>,
+  rule: RuleSetting,
+): boolean | undefined {
+  const expression = (rule.expression ?? '').trim();
+  if (!expression || targetItems.length === 0) return true;
+  try {
+    return evaluateRuleExpression(expression, expressionValues(submission, targetItems, studentsById));
+  } catch {
+    return undefined;
+  }
+}
+
+/** 論理式の判定に加える枠が多すぎると重いので、この件数までを絞り込みの対象にする。 */
+const OFFENDING_ITEM_SCAN_LIMIT = 200;
+
+/**
+ * 成立しなかった論理式について、「どの枠を直せばよいか」を絞り込む。
+ * 論理式の意味は読まない。対象の枠を1つずつ足していき、
+ * 足した瞬間に論理式が成り立たなくなった枠を「直す枠」として集める。
+ *
+ * 例：`MALE == 0`の競技に男子が3人いれば3人とも、`UNKNOWN == 0`なら名簿に無い1人だけを指す。
+ * `MALE >= 1 && FEMALE >= 1`のように「足りない」種類の論理式では1つも見つからない。
+ * その場合は競技全体を見てもらう。
+ */
+function offendingItems(
+  submission: Submission,
+  targetItems: SubmissionItem[],
+  studentsById: Map<string, ValidationContext['students'][number]>,
+  rule: RuleSetting,
+): SubmissionItem[] {
+  if (targetItems.length === 0 || targetItems.length > OFFENDING_ITEM_SCAN_LIMIT) return [];
+  const kept: SubmissionItem[] = [];
+  const offending: SubmissionItem[] = [];
+  for (const item of targetItems) {
+    kept.push(item);
+    if (ruleExpressionHolds(submission, kept, studentsById, rule) === false) {
+      kept.pop();
+      offending.push(item);
+    }
+  }
+  // 1つも外さずに成立するなら、原因は「多すぎる枠」ではなく「足りない条件」。
+  return offending.length === targetItems.length ? [] : offending;
+}
+
 function addExpressionRuleIssues(
   submission: Submission,
   items: SubmissionItem[],
@@ -255,33 +331,43 @@ function addExpressionRuleIssues(
   addIssue: (
     code: IssueCode, severity: Severity, item: SubmissionItem | undefined,
     currentValue: string,
-    override?: Partial<Pick<ValidationIssue, 'displayTitle' | 'locationText' | 'fixInstruction'>>,
+    override?: Partial<Pick<ValidationIssue,
+      'displayTitle' | 'locationText' | 'fixInstruction' | 'relatedItemIds'>>,
   ) => void,
 ): void {
   (rules ?? []).filter((rule) => rule.enabled && (rule.expression ?? '').trim()).forEach((rule) => {
-    const targetItems = expressionTargetItems(items, rule);
+    const targetItems = ruleTargetItems(items, rule);
     if (targetItems.length === 0) return;
     const values = expressionValues(submission, targetItems, studentsById);
     const valueText = `M=${values.M}, F=${values.F}, N=${values.N}, UNKNOWN=${values.UNKNOWN}, `
       + `EMPTY=${values.EMPTY}, UNIQUE=${values.UNIQUE}, MAX_PER_STUDENT=${values.MAX_PER_STUDENT}, `
       + `MAX_PER_EVENT=${values.MAX_PER_EVENT}`;
+    // 表示メッセージは複数のルールで同じ文になりうるので、どの行のルールかは
+    // 必ず`rule_id`と`ルール名`の両方で示す。
+    const ruleLabel = [rule.ruleId, rule.ruleName].map((value) => value.trim()).filter(Boolean).join('｜')
+      || 'ルール設定';
     try {
       if (evaluateRuleExpression(rule.expression ?? '', values)) return;
       const eventNames = [...new Set(targetItems.map((item) => item.eventName))];
+      const culprits = offendingItems(submission, targetItems, studentsById, rule);
+      const culpritText = culprits.length > 0
+        ? `直す枠：${culprits.map((item) => `${item.eventName} / ${item.slotName}`).join('、')}。`
+        : '足りない条件を満たすように、対象競技の登録を見直してください。';
       addIssue(
         ISSUE_CODES.RULE_EXPRESSION_FALSE,
         rule.judgment === '警告' ? 'WARNING' : 'ERROR',
         undefined,
         valueText,
         {
-          displayTitle: rule.displayMessage.trim() || `「${rule.ruleName || rule.ruleId}」を満たしていません`,
+          displayTitle: rule.displayMessage.trim() || `「${ruleLabel}」を満たしていません`,
           locationText: eventNames.length > 0 ? eventNames.join('、') : '対象競技',
-          fixInstruction: `対象競技の登録を確認してください。ルール：${rule.ruleName || rule.ruleId} / 論理式：${rule.expression}`,
+          fixInstruction: `${culpritText}ルール：${ruleLabel} / 論理式：${rule.expression}`,
+          relatedItemIds: culprits.map((item) => item.submissionItemId).join(','),
         },
       );
     } catch (error) {
       addIssue(ISSUE_CODES.RULE_EXPRESSION_INVALID, 'ERROR', undefined, rule.expression ?? '', {
-        displayTitle: `「${rule.ruleName || rule.ruleId}」の論理式を判定できません`,
+        displayTitle: `「${ruleLabel}」の論理式を判定できません`,
         locationText: 'ルール設定',
         fixInstruction: `「ルール設定」シートの論理式を直してください。${error instanceof Error ? error.message : String(error)}`,
       });
@@ -294,7 +380,8 @@ function addVacancyWarnings(
   addIssue: (
     code: IssueCode, severity: Severity, item: SubmissionItem | undefined,
     currentValue: string,
-    override?: Partial<Pick<ValidationIssue, 'displayTitle' | 'locationText' | 'fixInstruction'>>,
+    override?: Partial<Pick<ValidationIssue,
+      'displayTitle' | 'locationText' | 'fixInstruction' | 'relatedItemIds'>>,
   ) => void,
 ): void {
   const byEvent = new Map<string, SubmissionItem[]>();
@@ -309,6 +396,7 @@ function addVacancyWarnings(
     addIssue(ISSUE_CODES.VACANCY_CAPACITY_SHORTFALL, 'WARNING', undefined, `${vacancies.length}枠`, {
       displayTitle: `${eventName}は欠員許可により${vacancies.length}枠を空けています`,
       locationText: `${eventName} / ${vacancies.map((item) => item.slotName).join('、')}`,
+      relatedItemIds: vacancies.map((item) => item.submissionItemId).join(','),
     });
   }
 }

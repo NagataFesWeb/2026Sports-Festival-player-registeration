@@ -108,8 +108,17 @@ function candidateEventNames(locationText: string): string[] {
   return String(locationText ?? '')
     .split('、')
     .flatMap((segment) => [segment, segment.split(' / ')[0] ?? ''])
-    .map((name) => name.trim())
+    .map(normalizeDisplayName)
     .filter((name) => name !== '');
+}
+
+/**
+ * 競技名・枠名の照合用に前後の空白を落とす。
+ * 設定シートの競技名は末尾に空白が入っていることがあり、
+ * `locationText`側だけを整えると競技を見つけられなくなる。
+ */
+function normalizeDisplayName(value: string): string {
+  return String(value ?? '').trim();
 }
 
 /**
@@ -119,12 +128,13 @@ function candidateEventNames(locationText: string): string[] {
 function slotItemIds(locationText: string, items: SubmissionItem[]): string[] {
   const separator = String(locationText ?? '').indexOf(' / ');
   if (separator < 0) return [];
-  const eventName = locationText.slice(0, separator).trim();
+  const eventName = normalizeDisplayName(locationText.slice(0, separator));
   const slotNames = new Set(locationText.slice(separator + 3).split('、')
-    .map((name) => name.trim()).filter((name) => name !== ''));
+    .map(normalizeDisplayName).filter((name) => name !== ''));
   if (eventName === '' || slotNames.size === 0) return [];
   const matched = items
-    .filter((item) => item.eventName === eventName && slotNames.has(item.slotName))
+    .filter((item) => normalizeDisplayName(item.eventName) === eventName
+      && slotNames.has(normalizeDisplayName(item.slotName)))
     .map((item) => item.submissionItemId);
   return matched.length === slotNames.size ? matched : [];
 }
@@ -143,23 +153,32 @@ export function issueHighlights(
 ): IssueHighlight[] {
   const eventIdsByName = new Map<string, string[]>();
   items.forEach((item) => {
-    const ids = eventIdsByName.get(item.eventName) ?? [];
+    const key = normalizeDisplayName(item.eventName);
+    const ids = eventIdsByName.get(key) ?? [];
     if (!ids.includes(item.eventId)) ids.push(item.eventId);
-    eventIdsByName.set(item.eventName, ids);
+    eventIdsByName.set(key, ids);
   });
   const itemIds = new Set(items.map((item) => item.submissionItemId));
   const numbers: Record<Severity, number> = { WARNING: 0, ERROR: 0 };
   return issues.map((issue) => {
     numbers[issue.severity] += 1;
     const submissionLevel = SUBMISSION_LEVEL_ISSUE_CODES.has(issue.issueCode);
+    // 検査が「直す枠」を絞り込めた場合は、それを最優先で使う。
+    const relatedIds = String(issue.relatedItemIds ?? '').split(',')
+      .map((value) => value.trim())
+      .filter((value) => value !== '' && itemIds.has(value));
     const submissionItemIds = !submissionLevel && issue.submissionItemId
       && itemIds.has(issue.submissionItemId)
       ? [issue.submissionItemId]
-      : [];
+      : relatedIds;
     const slotIds = submissionLevel || submissionItemIds.length > 0
       ? []
       : slotItemIds(issue.locationText, items);
-    const eventIds = submissionLevel || submissionItemIds.length > 0 || slotIds.length > 0
+    // 論理式ルールは「直す枠」と「判断に使った競技」の両方が要る。
+    // 枠だけだと周りの登録が見えず、競技だけだとどこを直すか分からない。
+    const needsEventContext = issue.issueCode === 'RULE_EXPRESSION_FALSE';
+    const eventIds = submissionLevel
+      || (!needsEventContext && (submissionItemIds.length > 0 || slotIds.length > 0))
       ? []
       : candidateEventNames(issue.locationText)
         .flatMap((name) => eventIdsByName.get(name) ?? []);

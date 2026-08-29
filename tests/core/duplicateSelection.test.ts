@@ -27,10 +27,28 @@ describe('重複回答の採用候補', () => {
       submission('answer-1'),
       submission('answer-2'),
       submission('answer-3', { targetClass: 2 }),
-      submission('answer-4', { submissionType: 'CORRECTION' }),
     ];
     expect(new Set(affectedSubmissionIds(submissions, ['answer-1'])))
       .toEqual(new Set(['answer-1', 'answer-2']));
-    expect(affectedSubmissionIds(submissions, ['answer-4'])).toEqual(['answer-4']);
+    expect(affectedSubmissionIds(submissions, ['answer-3'])).toEqual(['answer-3']);
+  });
+
+  it('同じクラスの未登録の登録申請と修正申請は、互いに再検査対象へ含める', () => {
+    // 片方の内容が変わると、もう片方の「枠が重なっています」警告も変わる。
+    const submissions = [
+      submission('answer-1'),
+      submission('answer-2'),
+      submission('answer-3', { targetClass: 2 }),
+      submission('answer-4', { submissionType: 'CORRECTION' }),
+    ];
+    expect(new Set(affectedSubmissionIds(submissions, ['answer-4'])))
+      .toEqual(new Set(['answer-4', 'answer-1', 'answer-2']));
+    expect(new Set(affectedSubmissionIds(submissions, ['answer-1'])))
+      .toEqual(new Set(['answer-1', 'answer-2', 'answer-4']));
+    // 登録済みのクラスは突き合わせの相手にならない。
+    const registered = submissions.map((candidate) => candidate.submissionType === 'INITIAL'
+      ? { ...candidate, status: 'APPLIED' as const }
+      : candidate);
+    expect(affectedSubmissionIds(registered, ['answer-4'])).toEqual(['answer-4']);
   });
 });

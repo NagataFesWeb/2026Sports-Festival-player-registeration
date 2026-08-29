@@ -108,11 +108,28 @@ export interface ValidationIssue {
   currentValue: string;
   fixInstruction: string;
   status: IssueStatus;
+  /**
+   * この検査結果が指している選手枠の`submission_item_id`をカンマ区切りで並べたもの。
+   * 論理式ルールのように1つの枠に絞れない検査で、直すべき枠を画面で示すために使う。
+   * 絞り込めなかった場合は空文字。
+   */
+  relatedItemIds: string;
 }
 
 export interface ValidationContext {
   students: Student[];
   sameClassInitialSubmissionCount: number;
+  /**
+   * 同じクラスの、まだ登録されていない別の申請と枠が重なっている件数。
+   * 登録申請とあとから届いた修正申請の食い違いに気づけるようにする。
+   */
+  overlappingSubmission?: {
+    submissionId: string;
+    submissionType: SubmissionType;
+    submittedAt: string;
+    /** 重なっている枠のうち、内容が違う枠の数。 */
+    changedSlotCount: number;
+  };
   rules?: RuleSetting[];
 }
 
@@ -152,6 +169,11 @@ export interface SubmissionDetail {
     submission: Submission;
     items: SubmissionItem[];
   }>;
+  /**
+   * 未登録の登録申請とあとから届いた修正申請、または登録済みの内容と修正申請の突き合わせ表。
+   * 画面表示のたびに作り直す。重なりが無ければ`undefined`。
+   */
+  correctionOverlap?: CorrectionOverlap;
   /**
    * 申請確認画面の表示専用データ。同一競技内の重複登録、競技をまたいだ出場、
    * 検査結果と選手枠の対応を持つ。シートへは保存せず、画面表示のたびに作り直す。
@@ -204,6 +226,58 @@ export interface IssueHighlight {
   displayNumber: number;
   submissionItemIds: string[];
   eventIds: string[];
+}
+
+/** 突き合わせの相手。 */
+export type OverlapBaseKind =
+  /** まだ登録されていない同じクラスの登録申請。 */
+  | 'OPEN_INITIAL'
+  /** すでに登録済みの内容（`登録データ`）。 */
+  | 'REGISTRATION';
+
+export interface OverlapSlotRow {
+  eventId: string;
+  eventName: string;
+  slotId: string;
+  slotName: string;
+  /** 修正申請側の枠。取り込みのときに指定する。 */
+  correctionItemId: string;
+  correctionStudentId: string;
+  correctionStudentName: string;
+  correctionState: RegistrationState;
+  /** 比較相手の枠。`登録データ`との比較では空。 */
+  baseItemId: string;
+  baseStudentId: string;
+  baseStudentName: string;
+  baseState: RegistrationState | '';
+  /** 比較相手にこの枠があるか。修正申請だけにある枠は`false`。 */
+  baseExists: boolean;
+  /** 内容が違うか。同じなら取り込む必要がない。 */
+  changed: boolean;
+  /** 比較相手のこの枠にエラーが出ているか。先に直すべき枠。 */
+  baseHasError: boolean;
+}
+
+export interface CorrectionOverlap {
+  correctionSubmissionId: string;
+  correctionSubmittedAt: string;
+  baseKind: OverlapBaseKind;
+  /** `OPEN_INITIAL`のときの登録申請ID。`REGISTRATION`では空。 */
+  baseSubmissionId: string;
+  baseSubmittedAt: string;
+  baseStatus: Submission['status'] | '';
+  rows: OverlapSlotRow[];
+  /** 内容が違う枠の数。 */
+  changedCount: number;
+  /** 比較相手のエラーが出ている枠の数。 */
+  baseErrorCount: number;
+  /** 修正申請の内容を取り込めるか。`登録データ`との比較では取り込まない。 */
+  canImport: boolean;
+  /**
+   * 比較相手が最新でない可能性を伝える文言。空なら問題なし。
+   * 承認取消のあとの`登録データ`は古い版なので、そのまま信じさせない。
+   */
+  baseStaleMessage: string;
 }
 
 export interface SubmissionReview {

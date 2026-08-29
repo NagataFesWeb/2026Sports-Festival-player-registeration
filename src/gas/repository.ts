@@ -865,7 +865,8 @@ export function updateItemInput(
 export function replaceIssues(issues: ValidationIssue[]): void {
   replaceRows(SHEETS.issues, ISSUE_HEADERS, issues.map((issue) => [
     issue.issueId, issue.submissionId, issue.submissionItemId, issue.severity, issue.issueCode,
-    issue.displayTitle, issue.locationText, issue.currentValue, issue.fixInstruction, issue.status
+    issue.displayTitle, issue.locationText, issue.currentValue, issue.fixInstruction, issue.status,
+    issue.relatedItemIds
   ]));
 }
 
@@ -886,6 +887,7 @@ export function replaceIssuesForSubmissions(
     .setValues(issues.map((issue) => [
       issue.issueId, issue.submissionId, issue.submissionItemId, issue.severity, issue.issueCode,
       issue.displayTitle, issue.locationText, issue.currentValue, issue.fixInstruction, issue.status,
+      issue.relatedItemIds,
     ]));
 }
 
@@ -894,7 +896,8 @@ export function readIssues(): ValidationIssue[] {
     issueId: text(row[0]), submissionId: text(row[1]), submissionItemId: text(row[2]),
     severity: text(row[3]) as ValidationIssue['severity'], issueCode: text(row[4]),
     displayTitle: text(row[5]), locationText: text(row[6]), currentValue: text(row[7]),
-    fixInstruction: text(row[8]), status: text(row[9]) as ValidationIssue['status']
+    fixInstruction: text(row[8]), status: text(row[9]) as ValidationIssue['status'],
+    relatedItemIds: text(row[10])
   }));
 }
 
@@ -948,6 +951,12 @@ export interface ChangeHistoryRecord {
   reason: string;
   actorEmail: string;
   changedAt: string;
+}
+
+/** 変更履歴の書き込み後に失敗したときへ戻すため、追記した行を消す。 */
+export function removeFailedChangeHistoryRow(row: number): void {
+  const sheet = requireSheet(SHEETS.changeHistory);
+  if (row >= 2 && row <= sheet.getLastRow()) sheet.deleteRow(row);
 }
 
 export function appendChangeHistory(record: ChangeHistoryRecord): number {

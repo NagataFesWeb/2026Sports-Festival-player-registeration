@@ -30,6 +30,7 @@ import {
   handleGeneratedFormSubmitEvent,
   retryFailedFormResponses as retryFailedFormResponsesData,
   editSubmissionItem as updateSubmissionItem,
+  importCorrectionSlots as importCorrectionSlotsData,
   initializeDevelopmentWorkbookData,
   deleteDevelopmentWorkbookData,
   prepareRealFormTestData,
@@ -631,6 +632,15 @@ export function initializeDevelopmentWorkbook(): void {
     '初期設定が完了しました',
     6
   );
+  // 満たせなかったルールや、意図的なエラー・警告の作り方はトーストでは読み切れないので別に出す。
+  const notices = result.mockGenerationNotices ?? [];
+  if (notices.length > 0) {
+    ui.alert(
+      '疑似データを作成しました（確認してほしいことがあります）',
+      `${notices.join('\n\n')}\n\n疑似申請そのものは作成済みです。ルール設定を直したい場合は、直してから作り直してください。`,
+      ui.ButtonSet.OK,
+    );
+  }
   showDashboard();
 }
 
@@ -897,6 +907,15 @@ export function editSubmissionItem(
   reason: string
 ): ReturnType<typeof updateSubmissionItem> {
   return updateSubmissionItem(submissionId, submissionItemId, studentIdInput, registrationState, reason);
+}
+
+export function importCorrectionSlots(
+  correctionSubmissionId: string,
+  targetSubmissionId: string,
+  correctionItemIds: string[],
+  reason: string
+): ReturnType<typeof importCorrectionSlotsData> {
+  return importCorrectionSlotsData(correctionSubmissionId, targetSubmissionId, correctionItemIds, reason);
 }
 
 export function performSubmissionAction(

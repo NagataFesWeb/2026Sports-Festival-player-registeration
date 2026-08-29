@@ -62,6 +62,7 @@ function issue(overrides: Partial<ValidationIssue> = {}): ValidationIssue {
     currentValue: '9999',
     fixInstruction: '直してください',
     status: 'UNCONFIRMED',
+    relatedItemIds: '',
     ...overrides,
   };
 }
