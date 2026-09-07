@@ -1,3 +1,4 @@
+import { overlapPartnerIds } from './correction-comparison';
 import type { Submission } from '../shared/types';
 
 export function duplicateCandidates(
@@ -17,6 +18,11 @@ export function affectedSubmissionIds(
   requestedIds: string[],
 ): string[] {
   const affected = new Set(requestedIds.filter(Boolean));
+  // 突き合わせの相手を先に足す。片方を直したのに、もう片方の警告が古いままにならないようにする。
+  submissions.filter((submission) => affected.has(submission.submissionId))
+    .forEach((target) =>
+      overlapPartnerIds(submissions, target).forEach((id) => affected.add(id)));
+  // そのうえで、同じクラスの初回回答をまとめて検査し直す。重複警告が変わるため。
   submissions.filter((submission) => affected.has(submission.submissionId))
     .filter((submission) => submission.submissionType === 'INITIAL')
     .forEach((target) => submissions

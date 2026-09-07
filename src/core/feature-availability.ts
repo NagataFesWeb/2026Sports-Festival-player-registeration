@@ -49,6 +49,7 @@ export const CONDITION_BLOCKED_MESSAGES: Readonly<Record<FeatureConditionKey, st
   RULE_CHANGE_IDLE: 'ルール変更中です。先に「ルール変更を確定して全申請を再検査」または「ルール変更を取り消す」を実行してください。',
   ROSTER_JOB_IDLE: '選手名簿を作成中です。終わるまで待つか、「途中の名簿作成を取り消す」を実行してください。',
   ROSTER_JOB_ACTIVE: '途中まで進んだ名簿作成がありません。',
+  ROSTER_VERSION_EXISTS: 'まだ選手名簿を1度も作成していません。先に「承認済みから選手名簿を作成」を実行してください。',
   SUBMISSIONS_EXIST: 'まだ申請が1件も届いていません。',
   APPROVED_SUBMISSIONS_EXIST: '承認済みの申請がありません。先に申請を承認してください。',
   MOCK_SUBMISSIONS_EXIST: '疑似申請がありません。先に「開発用の疑似データを作る」を実行してください。',

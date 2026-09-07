@@ -63,7 +63,8 @@ export const ITEM_HEADERS = [
 
 export const ISSUE_HEADERS = [
   'issue_id', 'submission_id', 'submission_item_id', 'severity', 'issue_code',
-  'display_title', 'location_text', 'current_value', 'fix_instruction', 'status'
+  'display_title', 'location_text', 'current_value', 'fix_instruction', 'status',
+  'related_item_ids'
 ] as const;
 
 export const STUDENT_HEADERS = [

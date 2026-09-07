@@ -143,10 +143,26 @@ class Parser {
   }
 }
 
+/**
+ * 同じ論理式を何度も評価するため、字句解析の結果だけ使い回す。
+ * 疑似データ生成は1件の割り当てで同じ論理式を数千回評価する。
+ */
+const TOKEN_CACHE = new Map<string, Token[]>();
+const TOKEN_CACHE_LIMIT = 200;
+
+function cachedTokens(normalized: string): Token[] {
+  const cached = TOKEN_CACHE.get(normalized);
+  if (cached) return cached;
+  const tokens = tokenize(normalized);
+  if (TOKEN_CACHE.size >= TOKEN_CACHE_LIMIT) TOKEN_CACHE.clear();
+  TOKEN_CACHE.set(normalized, tokens);
+  return tokens;
+}
+
 export function evaluateRuleExpression(expression: string, values: RuleExpressionValues): boolean {
   const normalized = expression.normalize('NFKC').trim().replace(/^=\s*/, '');
   if (!normalized) throw new Error('論理式を入力してください。');
-  return new Parser(tokenize(normalized), values).parse();
+  return new Parser(cachedTokens(normalized), values).parse();
 }
 
 export function validateRuleExpression(expression: string): string | undefined {

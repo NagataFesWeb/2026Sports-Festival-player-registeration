@@ -57,6 +57,11 @@
     .candidate h4 { margin: 0; font-size: 1rem; }
     .candidate-list { display: grid; gap: var(--space-2); margin: var(--space-3) 0; }
     .candidate-item { padding-top: var(--space-2); border-top: 1px solid var(--color-track); }
+    .candidate-item.focus { border-left: 4px solid var(--color-danger); padding-left: var(--space-3); background: var(--color-danger-bg); }
+    .candidate-item.focus.warning-focus { border-left-color: var(--color-warning); background: var(--color-warning-bg); }
+    .overlap-choice { display: flex; align-items: center; gap: var(--space-2); margin-top: var(--space-2); font-weight: 700; }
+    .overlap-choice input { width: 20px; min-height: 20px; }
+    .overlap-choice span { display: inline; }
     .candidate-item strong, .candidate-item span { display: block; }
     .candidate button { width: 100%; }
     .actions { display: grid; gap: var(--space-2); margin-top: var(--space-4); }
@@ -230,7 +235,10 @@
   function loading() { app.replaceChildren(el('div', 'spinner')); }
   function showFailure(error) {
     const box = el('div', 'notice error');
-    box.append(el('strong', '', '画面を読み込めませんでした。'), el('p', '', error && error.message ? error.message : 'スプレッドシートを開き直して、もう一度お試しください。'));
+    // 疑似データの点検などは1件1行で複数行返すので、改行をそのまま表示する。
+    const detail = el('p', '', error && error.message ? error.message : 'スプレッドシートを開き直して、もう一度お試しください。');
+    detail.style.whiteSpace = 'pre-line';
+    box.append(el('strong', '', '画面を読み込めませんでした。'), detail);
     const retry = el('button', '', 'もう一度読み込む'); retry.onclick = loadDashboard; box.append(retry);
     app.replaceChildren(box);
   }
@@ -466,23 +474,43 @@
       if (issue.issueCode === 'RULE_EXPRESSION_FALSE') {
         // ルールは論理式だけで決まるため、判定に使った競技の登録内容をそのまま並べて直せるようにする。
         const targetEventIds = new Set(highlight ? highlight.eventIds : []);
-        const targetEvents = new Set(String(issue.locationText || '').split('、').map((name) => name.trim()));
+        // 競技名は設定シートの入力そのままで、末尾に空白が入っていることがある。
+        // どちらの側も前後の空白を落としてから照合する。
+        const trimmedName = (value) => String(value || '').trim();
+        const targetEvents = new Set(String(issue.locationText || '').split('、').map(trimmedName));
+        const focusIds = new Set(highlight ? highlight.submissionItemIds : []);
         const targetItems = detail.items.filter((candidate) =>
-          (targetEventIds.size ? targetEventIds.has(candidate.eventId) : targetEvents.has(candidate.eventName))
+          (targetEventIds.size ? targetEventIds.has(candidate.eventId) : targetEvents.has(trimmedName(candidate.eventName)))
           && candidate.registrationState !== 'NOT_PARTICIPATING');
+        const focusItems = targetItems.filter((candidate) => focusIds.has(candidate.submissionItemId));
         const card = el('article', `issue ${issue.severity.toLowerCase()}`);
         card.id = issueElementId(issue.issueId);
         card.append(
           el('h3', '', `${issue.severity === 'ERROR' ? 'エラー' : '警告'} ${number}`),
           el('p', 'message', `問題メッセージ：${issue.displayTitle}`),
           el('p', '', `対象：${issue.locationText || '対象競技'}（${targetItems.length}件の登録）`),
-          el('p', '', `性別の内訳：${genderBreakdown(targetItems)}`)
+          el('p', '', `性別の内訳：${genderBreakdown(targetItems)}`),
+          el('p', focusItems.length ? 'message' : 'muted', focusItems.length
+            ? `直す枠：${focusItems.length}件（下の一覧で色が付いている枠です）`
+            : '直す枠を1つに絞れませんでした。条件が足りていない可能性があるため、下の一覧全体を見直してください。')
         );
         const list = el('div', 'candidate-list');
-        targetItems.forEach((item) => {
-          const row = el('div', 'candidate-item');
+        // 全競技を対象にしたルールでは対象が100件を超えることがある。
+        // 直す枠が分かっている場合は、その枠と同じ競技の登録だけを並べる。
+        const focusEventIds = new Set(focusItems.map((candidate) => candidate.eventId));
+        const listedItems = focusItems.length && targetItems.length > 20
+          ? targetItems.filter((candidate) => focusIds.has(candidate.submissionItemId) || focusEventIds.has(candidate.eventId))
+          : targetItems;
+        if (listedItems.length < targetItems.length) {
+          card.append(el('p', 'muted', `下の一覧は、直す枠と同じ競技の${listedItems.length}件だけを表示しています（対象は全${targetItems.length}件）。`));
+        }
+        // 直す枠を先頭へ出す。50件の中から探させない。
+        const ordered = [...focusItems, ...listedItems.filter((candidate) => !focusIds.has(candidate.submissionItemId))];
+        ordered.forEach((item) => {
+          const isFocus = focusIds.has(item.submissionItemId);
+          const row = el('div', `candidate-item${isFocus ? ' focus' : ''}${isFocus && issue.severity === 'WARNING' ? ' warning-focus' : ''}`);
           const duplicateGroup = index.duplicateByItemId[item.submissionItemId];
-          const tags = tagRow([], duplicateGroup);
+          const tags = tagRow(isFocus ? [{ severity: issue.severity, label: 'ここを直す' }] : [], duplicateGroup);
           if (tags) row.append(tags);
           row.append(
             el('strong', '', `${item.eventName} / ${item.slotName}`),
@@ -555,10 +583,118 @@
       issues.append(card);
     });
     const actions = buildActions(detail);
+    const comparison = buildCorrectionOverlapSection(detail, isRejected);
     app.replaceChildren(
-      header, summary, buildOverlapSection(detail, review), issues,
+      header, summary,
+      ...(comparison ? [comparison] : []),
+      buildOverlapSection(detail, review), issues,
       buildSlotSection(detail, index, isRejected), actions
     );
+  }
+
+  /**
+   * まだ登録していない登録申請と、あとから届いた修正申請の突き合わせ。
+   * すでに登録済みのクラスでは、登録済みの内容と修正申請を並べて見せるだけにする。
+   */
+  function buildCorrectionOverlapSection(detail, isRejected) {
+    const overlap = detail.correctionOverlap;
+    if (!overlap || !overlap.rows || !overlap.rows.length) return null;
+    const registered = overlap.baseKind === 'REGISTRATION';
+    const baseLabel = registered ? '登録済みの内容' : '登録申請';
+    const section = el('section', 'overlap');
+    section.append(el('h2', '', `${baseLabel}と修正申請の突き合わせ`));
+    section.append(el('p', '', registered
+      ? `このクラスはすでに登録済みです。承認すると、この修正申請に含まれる競技は下の「修正申請」の内容へ置き換わります。内容が違う枠は${overlap.changedCount}件です。`
+      : `まだ登録していない登録申請（${formatDate(overlap.baseSubmittedAt)}送信）と、あとから届いた修正申請（${formatDate(overlap.correctionSubmittedAt)}送信）が同じ枠を指しています。内容が違う枠は${overlap.changedCount}件です。`));
+    if (!registered) {
+      section.append(el('p', '', overlap.baseErrorCount
+        ? `このうち${overlap.baseErrorCount}件は登録申請でエラーになっている枠です。修正申請の内容を取り込むと、登録申請のまま承認できるようになります。`
+        : '取り込んだ枠は登録申請の内容として保存され、取り込まなかった枠は登録申請のまま残ります。'));
+    }
+    if (overlap.baseStaleMessage) {
+      section.append(el('p', 'message', `注意：${overlap.baseStaleMessage}`));
+    }
+
+    let showAll = false;
+    const list = el('div', 'candidate-list');
+    const checkboxes = new Map();
+    const render = () => {
+      checkboxes.clear();
+      const rows = overlap.rows.filter((row) => showAll || row.changed);
+      const nodes = rows.map((row) => {
+        const item = el('div', `candidate-item${row.changed ? ' focus' : ''}${row.changed && !row.baseHasError ? ' warning-focus' : ''}`);
+        const tags = [];
+        if (row.baseHasError) tags.push({ severity: 'ERROR', label: '登録申請がエラー' });
+        else if (row.changed) tags.push({ severity: 'WARNING', label: '内容が違います' });
+        const tagLine = tagRow(tags, null);
+        if (tagLine) item.append(tagLine);
+        item.append(
+          el('strong', '', `${row.eventName} / ${row.slotName}`),
+          el('span', '', `${baseLabel}：${describeOverlapSide(row.baseExists, row.baseStudentId, row.baseStudentName, row.baseState)}`),
+          el('span', '', `修正申請：${describeOverlapSide(true, row.correctionStudentId, row.correctionStudentName, row.correctionState)}`)
+        );
+        if (overlap.canImport && !isRejected && row.changed) {
+          const label = el('label', 'overlap-choice');
+          const box = document.createElement('input');
+          box.type = 'checkbox';
+          box.checked = Boolean(row.baseHasError);
+          box.id = `overlap-${row.correctionItemId}`;
+          label.append(box, el('span', '', 'この枠は修正申請の内容にする'));
+          item.append(label);
+          checkboxes.set(row.correctionItemId, box);
+        }
+        return item;
+      });
+      if (!nodes.length) nodes.push(el('div', 'empty', '内容が違う枠はありません。'));
+      list.replaceChildren(...nodes);
+    };
+    render();
+
+    const toggle = el('button', '', 'すべての枠を表示する');
+    toggle.onclick = () => {
+      showAll = !showAll;
+      toggle.textContent = showAll ? '内容が違う枠だけ表示する' : 'すべての枠を表示する';
+      render();
+    };
+    section.append(list, toggle);
+
+    if (overlap.canImport && !isRejected) {
+      const form = el('div', 'editor');
+      const reason = document.createElement('textarea');
+      reason.placeholder = '取り込む理由（例：クラス担当へ確認し、修正フォームの内容を採用）';
+      const selectAll = el('button', '', '内容が違う枠をすべて選ぶ');
+      selectAll.onclick = () => checkboxes.forEach((box) => { box.checked = true; });
+      const submit = el('button', 'primary', '選んだ枠を登録申請へ取り込む');
+      submit.onclick = () => importCorrection(overlap, checkboxes, reason.value);
+      form.append(
+        el('strong', '', '選んだ枠を登録申請へ取り込む'),
+        el('p', 'muted', '取り込むと、登録申請の該当枠が修正申請の内容に置き換わり、変更履歴に残ります。'),
+        reason, selectAll, submit
+      );
+      section.append(form);
+    }
+    return section;
+  }
+
+  function describeOverlapSide(exists, studentId, studentName, state) {
+    if (!exists) return 'この枠はありません';
+    if (state === 'NOT_PARTICIPATING') return '出場しない';
+    if (!studentId) return '未入力';
+    return `${studentId} ${studentName || '氏名を確認できません'}${state === 'PENDING' ? '（調整中）' : ''}`;
+  }
+
+  async function importCorrection(overlap, checkboxes, reason) {
+    const selected = [...checkboxes.entries()].filter(([, box]) => box.checked).map(([id]) => id);
+    if (!selected.length) { window.alert('取り込む枠を1つ以上選んでください。'); return; }
+    if (!String(reason || '').trim()) { window.alert('取り込む理由を入力してください。'); return; }
+    if (!window.confirm(`${selected.length}件の枠を、修正申請の内容で登録申請へ取り込みます。よろしいですか？`)) return;
+    loading();
+    try {
+      const result = await run('importCorrectionSlots',
+        overlap.correctionSubmissionId, overlap.baseSubmissionId, selected, reason);
+      window.alert(result.message);
+      await loadDetail(result.targetSubmissionId);
+    } catch (error) { showFailure(error); }
   }
   /**
    * 同じ生徒がどこに何回登録されているかをまとめて見せる。

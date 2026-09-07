@@ -263,6 +263,35 @@ describe('疑似フォーム回答の検査', () => {
     expect([...usage.values()].filter((count) => count === 2)).toHaveLength(1);
   });
 
+  it('修正回答は、同じクラスの登録回答の枠をそのまま引き継ぐ（空けた枠も含む）', () => {
+    const students = generateMockStudents();
+    const classSize = students
+      .filter((candidate) => candidate.grade === 2 && candidate.classNumber === 1).length;
+    const requiredCount = classSize + 1;
+    const vacancyEvent: EventSetting = {
+      ...event, eventId: 'E005', eventName: '学年競技', targetGrade: '2年',
+      requiredCount, vacancyAllowed: true,
+    };
+    const generated = generateMockSubmissions({
+      year: 2026, normalFormId: 'normal-form', correctionFormId: 'correction-form',
+      normalRegistry: eventRegistry('normal', 'normal-form', 'E005', requiredCount, 1, true),
+      correctionRegistry: eventRegistry('correction', 'correction-form', 'E005', requiredCount, 1, true),
+      events: [vacancyEvent], students,
+    }, {
+      submissionCount: 2, targetGrades: [2], targetClasses: [1],
+      targetFormTypes: ['normal', 'correction'],
+      errorSubmissionCount: 0, warningSubmissionCount: 0,
+    });
+    expect(generated.submissions.map((submission) => submission.submissionType))
+      .toEqual(['INITIAL', 'CORRECTION']);
+    const bySubmission = generated.submissions.map((submission) => generated.items
+      .filter((item) => item.submissionId === submission.submissionId)
+      .map((item) => `${item.slotId}=${item.studentIdInput}:${item.registrationState}`));
+    // 枠ごとの選手も登録状態も一致する。空けた枠を修正回答が埋め直さない。
+    expect(bySubmission[1]).toEqual(bySubmission[0]);
+    expect(bySubmission[0]!.filter((slot) => slot.endsWith('NOT_PARTICIPATING'))).toHaveLength(1);
+  });
+
   it('欠員許可の競技は生徒数を超えた枠を空けて警告だけにする', () => {
     const students = generateMockStudents();
     const classSize = students.filter((candidate) => candidate.grade === 2 && candidate.classNumber === 1).length;

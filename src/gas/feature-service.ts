@@ -20,6 +20,7 @@ import { getSystemMode, isPracticeWorkbook } from './mode-probe';
 import {
   activeRosterSource,
   isProductionStudentMasterActive,
+  readRosterHistory,
   readStudents,
   readSubmissions,
 } from './repository';
@@ -85,6 +86,7 @@ export function buildFeatureConditionSnapshot(): FeatureConditionSnapshot {
       RULE_CHANGE_IDLE: !ruleChangeActive,
       ROSTER_JOB_IDLE: !rosterJobActive,
       ROSTER_JOB_ACTIVE: rosterJobActive,
+      ROSTER_VERSION_EXISTS: settingsReady && readRosterHistory().length > 0,
       SUBMISSIONS_EXIST: submissions.length > 0,
       APPROVED_SUBMISSIONS_EXIST: submissions.some((submission) =>
         submission.status === 'APPROVED' || submission.status === 'APPLIED'),
