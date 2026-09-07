@@ -30,6 +30,7 @@ import { readFormDesign } from './settings-repository';
 import { auditManagementSharing } from './security-audit-service';
 import { appendSettingsChangeHistory } from './settings-change-service';
 import { getPlayerRosterJobStatus } from './roster-service';
+import { invalidateSheetCache } from './sheet-cache';
 
 /** 本番開始前に空にするシート。開発中に作った申請・回答・履歴・帳票データはここへ集約されている。 */
 const CLEARED_SHEETS = [
@@ -204,6 +205,8 @@ export function activateProductionMode(): ProductionModeResult {
   }
   const lock = LockService.getDocumentLock();
   if (!lock.tryLock(30_000)) throw new Error('ほかの担当者が処理中です。少し待ってから、もう一度実行してください。');
+  // ロックを取った直後は、ほかの担当者やトリガーが書いた内容を必ず読み直す。
+  invalidateSheetCache();
   try {
     ensureApplicationSheets();
     const rosterFolderUrls = [...new Set(readRosterHistory()

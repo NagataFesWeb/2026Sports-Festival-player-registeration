@@ -43,6 +43,7 @@ import {
   type MockRosterSource,
 } from '../core/mock-roster-source';
 import { getSystemMode } from './mode-probe';
+import { cachedSheetRows, invalidateSheetCache } from './sheet-cache';
 
 type SheetValue = string | number | boolean | Date;
 type Header = readonly string[];
@@ -60,12 +61,22 @@ function spreadsheet(): Spreadsheet {
   return active;
 }
 
-export function requireSheet(name: string): Sheet {
+/** このモジュール内で使う。読み取りメモへは触れない。 */
+function sheetNamed(name: string): Sheet {
   const sheet = spreadsheet().getSheetByName(name);
   if (!sheet) {
     throw new Error(`「${name}」シートがありません。最初に初期設定を実行してください。`);
   }
   return sheet;
+}
+
+/**
+ * ほかのモジュールへSheetを渡す入口。渡した先で何を書くか分からないので、
+ * そのシートの読み取りメモを先に捨てる。モジュール内では`sheetNamed`を使う。
+ */
+export function requireSheet(name: string): Sheet {
+  invalidateSheetCache(name);
+  return sheetNamed(name);
 }
 
 function ensureSheet(name: string, headers?: Header): Sheet {
@@ -75,6 +86,7 @@ function ensureSheet(name: string, headers?: Header): Sheet {
     sheet.getRange(1, 1, 1, headers.length).setValues([[...headers]]);
     sheet.setFrozenRows(1);
   }
+  invalidateSheetCache(name);
   return sheet;
 }
 
@@ -133,6 +145,7 @@ function ensureProductionStudentSheet(): Sheet {
     sheet.getRange('D2').setFormula('=ARRAYFORMULA(IF(A2:A="","",IFERROR(VALUE(MID(A2:A&"",2,1)),"")))');
     sheet.getRange('E2').setFormula('=ARRAYFORMULA(IF(A2:A="","",IFERROR(VALUE(RIGHT(A2:A&"",2)),"")))');
   }
+  invalidateSheetCache(SHEETS.productionStudents);
   return sheet;
 }
 
@@ -234,6 +247,8 @@ export function ensureMockDataSettings(students: Student[]): void {
   };
 
   const oldDataRows = Math.max(0, sheet.getLastRow() - 1);
+  // ここから先はシートを書き換える。途中で失敗しても古い内容のメモを使わないよう、先に捨てる。
+  invalidateSheetCache(SHEETS.mockDataSettings);
   // 入力規則だけが値のない行にも残るため、B列の全データ行を先に解除する。
   // flushしないと、同一実行内のsetValuesが旧規則で判定される場合がある。
   const validationRows = Math.max(1, sheet.getMaxRows() - 1);
@@ -275,14 +290,16 @@ export function ensureMockDataSettings(students: Student[]): void {
     .setNote('実際に作成する申請数を超えた場合は、自動的に申請数以下へ調整します。');
   sheet.getRange(rowNumberOf(MOCK_DATA_SETTING_KEYS.rosterSourceStamp), 2, 1, 1)
     .setNote('自動で記録します。編集しないでください。');
+  invalidateSheetCache(SHEETS.mockDataSettings);
 }
 
 /** `疑似データ設定`シートの1行だけを読む。`ensureMockDataSettings`は呼ばない。 */
 function mockDataSettingValue(key: string): string {
-  const sheet = spreadsheet().getSheetByName(SHEETS.mockDataSettings);
-  if (!sheet || sheet.getLastRow() < 2) return '';
-  return sheet.getRange(2, 1, sheet.getLastRow() - 1, 2).getDisplayValues()
-    .find((row) => (row[0] ?? '') === key)?.[1] ?? '';
+  return cachedSheetRows(SHEETS.mockDataSettings, 'display:2', () => {
+    const sheet = spreadsheet().getSheetByName(SHEETS.mockDataSettings);
+    if (!sheet || sheet.getLastRow() < 2) return [];
+    return sheet.getRange(2, 1, sheet.getLastRow() - 1, 2).getDisplayValues();
+  }).find((row) => (row[0] ?? '') === key)?.[1] ?? '';
 }
 
 function writeMockDataSettingValue(key: string, value: string): void {
@@ -292,6 +309,7 @@ function writeMockDataSettingValue(key: string, value: string): void {
   const offset = keys.findIndex((row) => (row[0] ?? '') === key);
   if (offset < 0) return;
   sheet.getRange(offset + 2, 2, 1, 1).setValue(value);
+  invalidateSheetCache(SHEETS.mockDataSettings);
 }
 
 /** 利用者が選んだ名簿。シートも行も無いときは疑似生徒マスター。 */
@@ -413,59 +431,65 @@ export interface RosterHistoryRecord {
 }
 
 export function appendRosterHistory(record: RosterHistoryRecord): number {
-  const sheet = requireSheet(SHEETS.rosterHistory);
+  const sheet = sheetNamed(SHEETS.rosterHistory);
   const row = sheet.getLastRow() + 1;
   sheet.getRange(row, 1, 1, ROSTER_HISTORY_HEADERS.length).setValues([[
     record.rosterVersionId, record.inputName, record.versionName, record.folderId,
     record.folderUrl, record.registrationCount, record.sourceSubmissionCount,
     record.createdBy, record.createdAt,
   ]]);
+  invalidateSheetCache(SHEETS.rosterHistory);
   return row;
 }
 
 export function rosterHistoryHasVersion(versionName: string): boolean {
-  const sheet = requireSheet(SHEETS.rosterHistory);
+  const sheet = sheetNamed(SHEETS.rosterHistory);
   if (sheet.getLastRow() < 2) return false;
   return sheet.getRange(2, 3, sheet.getLastRow() - 1, 1).getDisplayValues()
     .some((row) => row[0] === versionName);
 }
 
 export function removeFailedRosterHistoryRow(row: number): void {
-  const sheet = requireSheet(SHEETS.rosterHistory);
+  const sheet = sheetNamed(SHEETS.rosterHistory);
   if (row >= 2 && row <= sheet.getLastRow()) sheet.deleteRow(row);
+  invalidateSheetCache(SHEETS.rosterHistory);
 }
 
 export function appendSubmissionWithItems(submission: Submission, items: SubmissionItem[]): void {
-  const submissionSheet = requireSheet(SHEETS.submissions);
+  const submissionSheet = sheetNamed(SHEETS.submissions);
   submissionSheet.getRange(submissionSheet.getLastRow() + 1, 1, 1, SUBMISSION_HEADERS.length)
     .setValues([submissionToRow(submission)]);
+  invalidateSheetCache(SHEETS.submissions);
   if (items.length === 0) return;
-  const itemSheet = requireSheet(SHEETS.items);
+  const itemSheet = sheetNamed(SHEETS.items);
   itemSheet.getRange(itemSheet.getLastRow() + 1, 1, items.length, ITEM_HEADERS.length).setValues(items.map((item) => [
     item.submissionItemId, item.submissionId, submission.submitterStudentId, submission.submitterNameInput,
     item.eventId, item.eventName, item.slotId, item.slotName, item.studentIdInput,
     item.studentNameInput, item.normalizedStudentId, item.normalizedName, item.registrationState, item.required,
   ]));
+  invalidateSheetCache(SHEETS.items);
 }
 
 export function removeSubmissionWithItems(submissionId: string): void {
-  removeRowsByValue(requireSheet(SHEETS.items), 2, submissionId);
-  removeRowsByValue(requireSheet(SHEETS.submissions), 1, submissionId);
+  removeRowsByValue(SHEETS.items, 2, submissionId);
+  removeRowsByValue(SHEETS.submissions, 1, submissionId);
 }
 
-function removeRowsByValue(sheet: Sheet, column: number, value: string): void {
-  if (sheet.getLastRow() < 2) return;
-  const values = sheet.getRange(2, column, sheet.getLastRow() - 1, 1).getDisplayValues();
-  for (let index = values.length - 1; index >= 0; index -= 1) {
-    if (values[index]?.[0] === value) sheet.deleteRow(index + 2);
-  }
+function removeRowsByValue(sheetName: string, column: number, value: string): void {
+  removeRowsWhere(sheetName, column, (candidate) => candidate === value);
 }
 
-function removeRowsWhere(sheet: Sheet, column: number, predicate: (value: string) => boolean): void {
+function removeRowsWhere(sheetName: string, column: number, predicate: (value: string) => boolean): void {
+  const sheet = sheetNamed(sheetName);
   if (sheet.getLastRow() < 2) return;
   const values = sheet.getRange(2, column, sheet.getLastRow() - 1, 1).getDisplayValues();
-  for (let index = values.length - 1; index >= 0; index -= 1) {
-    if (predicate(values[index]?.[0] ?? '')) sheet.deleteRow(index + 2);
+  try {
+    for (let index = values.length - 1; index >= 0; index -= 1) {
+      if (predicate(values[index]?.[0] ?? '')) sheet.deleteRow(index + 2);
+    }
+  } finally {
+    // 途中で失敗しても、消した行が残ったメモを使わないようにする。
+    invalidateSheetCache(sheetName);
   }
 }
 
@@ -476,12 +500,12 @@ export function deleteDevelopmentMockRows(): void {
 
 /** 実フォーム確認用。照合に必要な疑似生徒マスターを残し、自動生成した回答・申請だけを消す。 */
 export function deleteDevelopmentMockSubmissionRows(): void {
-  removeRowsWhere(requireSheet(SHEETS.rawFormResponses), 2, isDevelopmentMockResponseId);
-  removeRowsWhere(requireSheet(SHEETS.items), 2, isDevelopmentMockSubmissionId);
-  removeRowsWhere(requireSheet(SHEETS.issues), 2, isDevelopmentMockSubmissionId);
-  removeRowsWhere(requireSheet(SHEETS.approvals), 2, isDevelopmentMockSubmissionId);
-  removeRowsWhere(requireSheet(SHEETS.changeHistory), 2, isDevelopmentMockSubmissionId);
-  removeRowsWhere(requireSheet(SHEETS.submissions), 1, isDevelopmentMockSubmissionId);
+  removeRowsWhere(SHEETS.rawFormResponses, 2, isDevelopmentMockResponseId);
+  removeRowsWhere(SHEETS.items, 2, isDevelopmentMockSubmissionId);
+  removeRowsWhere(SHEETS.issues, 2, isDevelopmentMockSubmissionId);
+  removeRowsWhere(SHEETS.approvals, 2, isDevelopmentMockSubmissionId);
+  removeRowsWhere(SHEETS.changeHistory, 2, isDevelopmentMockSubmissionId);
+  removeRowsWhere(SHEETS.submissions, 1, isDevelopmentMockSubmissionId);
   // 疑似申請が無くなったので、どの名簿で作ったかの記録も消す。残すと次回の食い違い検出が誤作動する。
   writeMockRosterSourceStamp('');
 }
@@ -493,6 +517,7 @@ export function clearSheetDataRows(sheetName: string): number {
   const rows = dataRowCount(sheet);
   if (rows === 0) return 0;
   sheet.getRange(2, 1, rows, Math.max(1, sheet.getLastColumn())).clearContent();
+  invalidateSheetCache(sheetName);
   return rows;
 }
 
@@ -506,6 +531,7 @@ export function deleteSheetsWhere(predicate: (name: string) => boolean): number 
   const book = spreadsheet();
   const targets = book.getSheets().filter((sheet) => predicate(sheet.getName()));
   targets.forEach((sheet) => book.deleteSheet(sheet));
+  invalidateSheetCache();
   return targets.length;
 }
 
@@ -535,11 +561,18 @@ export function ensureRawFormResponseSheet(): void {
   ensureSheet(SHEETS.rawFormResponses, RAW_FORM_RESPONSE_HEADERS);
 }
 
-export function findRawFormResponse(formId: string, responseId: string): { row: number; record: RawFormResponseRecord } | undefined {
+/** 回答原本の全行を表示文字列で読む。同じ実行内では1回だけ読む。 */
+function rawFormResponseDisplayRows(): string[][] {
   ensureRawFormResponseSheet();
-  const sheet = requireSheet(SHEETS.rawFormResponses);
-  if (sheet.getLastRow() < 2) return undefined;
-  const values = sheet.getRange(2, 1, sheet.getLastRow() - 1, RAW_FORM_RESPONSE_HEADERS.length).getDisplayValues();
+  return cachedSheetRows(SHEETS.rawFormResponses, `display:${RAW_FORM_RESPONSE_HEADERS.length}`, () => {
+    const sheet = sheetNamed(SHEETS.rawFormResponses);
+    if (sheet.getLastRow() < 2) return [];
+    return sheet.getRange(2, 1, sheet.getLastRow() - 1, RAW_FORM_RESPONSE_HEADERS.length).getDisplayValues();
+  });
+}
+
+export function findRawFormResponse(formId: string, responseId: string): { row: number; record: RawFormResponseRecord } | undefined {
+  const values = rawFormResponseDisplayRows();
   const index = values.findIndex((row) => row[0] === formId && row[1] === responseId);
   if (index < 0) return undefined;
   const row = values[index]!;
@@ -547,40 +580,42 @@ export function findRawFormResponse(formId: string, responseId: string): { row: 
 }
 
 export function findRawFormResponseBySubmissionId(submissionId: string): RawFormResponseRecord | undefined {
-  ensureRawFormResponseSheet();
-  const sheet = requireSheet(SHEETS.rawFormResponses);
-  if (sheet.getLastRow() < 2) return undefined;
-  const values = sheet.getRange(2, 1, sheet.getLastRow() - 1, RAW_FORM_RESPONSE_HEADERS.length).getDisplayValues();
-  const row = values.find((value) => value[6] === submissionId);
+  const row = rawFormResponseDisplayRows().find((value) => value[6] === submissionId);
   return row ? rawResponseFromRow(row) : undefined;
 }
 
 export function appendRawFormResponse(record: RawFormResponseRecord): number {
   ensureRawFormResponseSheet();
-  const sheet = requireSheet(SHEETS.rawFormResponses);
+  const sheet = sheetNamed(SHEETS.rawFormResponses);
   const row = sheet.getLastRow() + 1;
   sheet.getRange(row, 1, 1, RAW_FORM_RESPONSE_HEADERS.length).setValues([rawResponseToRow(record)]);
+  invalidateSheetCache(SHEETS.rawFormResponses);
   return row;
 }
 
 export function updateRawFormResponse(row: number, record: RawFormResponseRecord): void {
-  requireSheet(SHEETS.rawFormResponses).getRange(row, 1, 1, RAW_FORM_RESPONSE_HEADERS.length)
+  sheetNamed(SHEETS.rawFormResponses).getRange(row, 1, 1, RAW_FORM_RESPONSE_HEADERS.length)
     .setValues([rawResponseToRow(record)]);
+  invalidateSheetCache(SHEETS.rawFormResponses);
 }
 
 /** 実機テストの後片付け用。指定した回答IDの原本行だけを削除する。 */
 export function removeRawFormResponses(responseIds: string[]): number {
   const targets = new Set(responseIds.filter((value) => value !== ''));
   if (targets.size === 0) return 0;
-  const sheet = requireSheet(SHEETS.rawFormResponses);
+  const sheet = sheetNamed(SHEETS.rawFormResponses);
   if (sheet.getLastRow() < 2) return 0;
   const values = sheet.getRange(2, 2, sheet.getLastRow() - 1, 1).getDisplayValues();
   let removed = 0;
-  for (let index = values.length - 1; index >= 0; index -= 1) {
-    if (targets.has(values[index]?.[0] ?? '')) {
-      sheet.deleteRow(index + 2);
-      removed += 1;
+  try {
+    for (let index = values.length - 1; index >= 0; index -= 1) {
+      if (targets.has(values[index]?.[0] ?? '')) {
+        sheet.deleteRow(index + 2);
+        removed += 1;
+      }
     }
+  } finally {
+    invalidateSheetCache(SHEETS.rawFormResponses);
   }
   return removed;
 }
@@ -608,7 +643,9 @@ function rawResponseFromRow(row: string[]): RawFormResponseRecord {
 }
 
 function replaceRows(sheetName: string, headers: Header, rows: SheetValue[][]): void {
-  const sheet = requireSheet(sheetName);
+  const sheet = sheetNamed(sheetName);
+  // 途中で失敗しても古い内容のメモを使わないよう、書く前にも捨てる。
+  invalidateSheetCache(sheetName);
   const previousRows = dataRowCount(sheet);
   if (previousRows > 0) {
     sheet.getRange(2, 1, previousRows, Math.max(headers.length, sheet.getLastColumn())).clearContent();
@@ -617,13 +654,17 @@ function replaceRows(sheetName: string, headers: Header, rows: SheetValue[][]): 
   if (rows.length > 0) {
     sheet.getRange(2, 1, rows.length, headers.length).setValues(rows);
   }
+  invalidateSheetCache(sheetName);
 }
 
+/** データ行を`getValues()`で読む。同じ実行内の2回目以降はメモから返す（毎回コピー）。 */
 function readRows(sheetName: string, headers: Header): SheetValue[][] {
-  const sheet = requireSheet(sheetName);
-  const count = dataRowCount(sheet);
-  if (count === 0) return [];
-  return sheet.getRange(2, 1, count, headers.length).getValues() as SheetValue[][];
+  return cachedSheetRows<SheetValue>(sheetName, `values:${headers.length}`, () => {
+    const sheet = sheetNamed(sheetName);
+    const count = dataRowCount(sheet);
+    if (count === 0) return [];
+    return sheet.getRange(2, 1, count, headers.length).getValues() as SheetValue[][];
+  });
 }
 
 const text = (value: SheetValue | undefined): string => value == null ? '' : String(value);
@@ -693,9 +734,11 @@ export function nextDevelopmentMockResponseSequence(): number {
 }
 
 function readProductionStudentInputRows(): ProductionStudentInputRow[] {
-  const sheet = spreadsheet().getSheetByName(SHEETS.productionStudents);
-  if (!sheet || sheet.getLastRow() < 2) return [];
-  return sheet.getRange(2, 1, sheet.getLastRow() - 1, 6).getDisplayValues()
+  return cachedSheetRows(SHEETS.productionStudents, 'display:6', () => {
+    const sheet = spreadsheet().getSheetByName(SHEETS.productionStudents);
+    if (!sheet || sheet.getLastRow() < 2) return [];
+    return sheet.getRange(2, 1, sheet.getLastRow() - 1, 6).getDisplayValues();
+  })
     .map((row, index) => ({
       rowNumber: index + 2,
       studentId: row[0] ?? '',
@@ -722,13 +765,14 @@ export function findSubmission(submissionId: string): Submission | undefined {
 }
 
 export function updateSubmission(submission: Submission): void {
-  const sheet = requireSheet(SHEETS.submissions);
+  const sheet = sheetNamed(SHEETS.submissions);
   const rows = readRows(SHEETS.submissions, SUBMISSION_HEADERS);
   const index = rows.findIndex((row) => text(row[0]) === submission.submissionId);
   if (index < 0) {
     throw new Error('指定された申請が見つかりません。一覧を開き直してください。');
   }
   sheet.getRange(index + 2, 1, 1, SUBMISSION_HEADERS.length).setValues([submissionToRow(submission)]);
+  invalidateSheetCache(SHEETS.submissions);
 }
 
 function submissionToRow(value: Submission): SheetValue[] {
@@ -780,13 +824,20 @@ export function replaceItems(items: SubmissionItem[]): void {
 }
 
 export function readItems(): SubmissionItem[] {
-  const sheet = requireSheet(SHEETS.items);
-  const count = dataRowCount(sheet);
-  if (count === 0) return [];
-  const columnCount = sheet.getLastColumn();
-  const headers = sheet.getRange(1, 1, 1, columnCount).getDisplayValues()[0] ?? [];
+  // 先頭行にヘッダー（表示文字列）、以降にデータ行を入れて1つのメモにする。
+  const table = cachedSheetRows<SheetValue>(SHEETS.items, 'header+values', () => {
+    const sheet = sheetNamed(SHEETS.items);
+    const count = dataRowCount(sheet);
+    if (count === 0) return [];
+    const columnCount = sheet.getLastColumn();
+    const headerRow = sheet.getRange(1, 1, 1, columnCount).getDisplayValues()[0] ?? [];
+    const dataRows = sheet.getRange(2, 1, count, columnCount).getValues() as SheetValue[][];
+    return [headerRow, ...dataRows];
+  });
+  if (table.length === 0) return [];
+  const headers = (table[0] ?? []).map((header) => text(header));
   const columnByName = new Map(headers.map((header, index) => [header, index]));
-  const rows = sheet.getRange(2, 1, count, columnCount).getValues() as SheetValue[][];
+  const rows = table.slice(1);
   const value = (row: SheetValue[], header: string): SheetValue | undefined => {
     const index = columnByName.get(header);
     return index == null ? undefined : row[index];
@@ -809,7 +860,7 @@ export function readItems(): SubmissionItem[] {
 
 export function updateValidatedItems(items: SubmissionItem[]): void {
   if (items.length === 0) return;
-  const sheet = requireSheet(SHEETS.items);
+  const sheet = sheetNamed(SHEETS.items);
   if (sheet.getLastRow() < 2) return;
   const rowByItemId = new Map(
     sheet.getRange(2, 1, sheet.getLastRow() - 1, 1).getDisplayValues()
@@ -827,6 +878,7 @@ export function updateValidatedItems(items: SubmissionItem[]): void {
     const group = located.slice(start, end);
     sheet.getRange(group[0]!.row, normalizedStudentIdColumn, group.length, 2)
       .setValues(group.map(({ item }) => [item.normalizedStudentId, item.normalizedName]));
+    invalidateSheetCache(SHEETS.items);
     start = end;
   }
 }
@@ -840,7 +892,7 @@ export function updateItemInput(
   studentIdInput: string,
   registrationState: SubmissionItem['registrationState']
 ): SubmissionItem {
-  const sheet = requireSheet(SHEETS.items);
+  const sheet = sheetNamed(SHEETS.items);
   if (sheet.getLastRow() < 2) {
     throw new Error('修正する申請項目が見つかりません。詳細を開き直してください。');
   }
@@ -856,7 +908,9 @@ export function updateItemInput(
     .find((student) => student.studentId === normalizedStudentId)?.name ?? '';
   sheet.getRange(row.getRow(), studentIdColumn, 1, 2)
     .setValues([[studentIdInput, studentName]]);
+  invalidateSheetCache(SHEETS.items);
   sheet.getRange(row.getRow(), stateColumn).setValue(registrationState);
+  invalidateSheetCache(SHEETS.items);
   const updated = findItem(itemId);
   if (!updated) throw new Error('修正後の申請項目を読み取れませんでした。再検査してください。');
   return updated;
@@ -875,11 +929,15 @@ export function replaceIssuesForSubmissions(
   issues: ValidationIssue[],
 ): void {
   const targets = new Set(submissionIds);
-  const sheet = requireSheet(SHEETS.issues);
+  const sheet = sheetNamed(SHEETS.issues);
   if (sheet.getLastRow() >= 2) {
     const values = sheet.getRange(2, 2, sheet.getLastRow() - 1, 1).getDisplayValues();
-    for (let index = values.length - 1; index >= 0; index -= 1) {
-      if (targets.has(values[index]?.[0] ?? '')) sheet.deleteRow(index + 2);
+    try {
+      for (let index = values.length - 1; index >= 0; index -= 1) {
+        if (targets.has(values[index]?.[0] ?? '')) sheet.deleteRow(index + 2);
+      }
+    } finally {
+      invalidateSheetCache(SHEETS.issues);
     }
   }
   if (issues.length === 0) return;
@@ -889,6 +947,7 @@ export function replaceIssuesForSubmissions(
       issue.displayTitle, issue.locationText, issue.currentValue, issue.fixInstruction, issue.status,
       issue.relatedItemIds,
     ]));
+  invalidateSheetCache(SHEETS.issues);
 }
 
 export function readIssues(): ValidationIssue[] {
@@ -911,11 +970,12 @@ export interface ApprovalRecord {
 }
 
 export function appendApproval(record: ApprovalRecord): number {
-  const sheet = requireSheet(SHEETS.approvals);
+  const sheet = sheetNamed(SHEETS.approvals);
   const row = sheet.getLastRow() + 1;
   sheet.getRange(row, 1, 1, APPROVAL_HEADERS.length).setValues([[
     record.approvalId, record.submissionId, record.action, record.actorEmail, record.reason, record.actedAt
   ]]);
+  invalidateSheetCache(SHEETS.approvals);
   return row;
 }
 
@@ -934,8 +994,9 @@ export function resetApprovalHistory(): void {
 }
 
 export function removeFailedApprovalRow(row: number): void {
-  const sheet = requireSheet(SHEETS.approvals);
+  const sheet = sheetNamed(SHEETS.approvals);
   if (row >= 2 && row <= sheet.getLastRow()) sheet.deleteRow(row);
+  invalidateSheetCache(SHEETS.approvals);
 }
 
 export interface ChangeHistoryRecord {
@@ -955,12 +1016,13 @@ export interface ChangeHistoryRecord {
 
 /** 変更履歴の書き込み後に失敗したときへ戻すため、追記した行を消す。 */
 export function removeFailedChangeHistoryRow(row: number): void {
-  const sheet = requireSheet(SHEETS.changeHistory);
+  const sheet = sheetNamed(SHEETS.changeHistory);
   if (row >= 2 && row <= sheet.getLastRow()) sheet.deleteRow(row);
+  invalidateSheetCache(SHEETS.changeHistory);
 }
 
 export function appendChangeHistory(record: ChangeHistoryRecord): number {
-  const sheet = requireSheet(SHEETS.changeHistory);
+  const sheet = sheetNamed(SHEETS.changeHistory);
   const row = sheet.getLastRow() + 1;
   sheet.getRange(row, 1, 1, CHANGE_HEADERS.length).setValues([[
     record.changeId, record.submissionId, record.submissionItemId,
@@ -968,5 +1030,6 @@ export function appendChangeHistory(record: ChangeHistoryRecord): number {
     record.afterStudentName, record.beforeRegistrationState,
     record.afterRegistrationState, record.reason, record.actorEmail, record.changedAt
   ]]);
+  invalidateSheetCache(SHEETS.changeHistory);
   return row;
 }

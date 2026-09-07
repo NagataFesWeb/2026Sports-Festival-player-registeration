@@ -6,6 +6,7 @@ import {
 } from '../shared/constants';
 import { assertAuthorized } from './auth-service';
 import { readFormDesign, syncRuleEventCheckboxes, writeFormDesign } from './settings-repository';
+import { invalidateSheetCache } from './sheet-cache';
 
 const GUARDED_SHEETS = [SHEETS.eventSettings, SHEETS.ruleSettings, SHEETS.formDesign] as const;
 
@@ -90,16 +91,21 @@ export function restorePublishedSettingsSnapshot(targetSheetName?: string): void
   const targets = targetSheetName
     ? GUARDED_SHEETS.filter((name) => name === targetSheetName)
     : GUARDED_SHEETS;
-  targets.forEach((name) => {
-    const sourceRows = rows.filter((row) => row[0] === name).sort((a, b) => a[1] - b[1]);
-    const sheet = book.getSheetByName(name);
-    if (!sheet || sourceRows.length === 0) return;
-    sheet.getDataRange().clearContent();
-    const values = sourceRows.map((row) => JSON.parse(row[2]) as unknown[]);
-    const width = Math.max(...values.map((row) => row.length));
-    sheet.getRange(1, 1, values.length, width)
-      .setValues(values.map((row) => [...row, ...Array(width - row.length).fill('')]));
-  });
+  // 設定シートを直接書き換えるので、読み取りメモを全部捨てる。途中で失敗しても残さない。
+  try {
+    targets.forEach((name) => {
+      const sourceRows = rows.filter((row) => row[0] === name).sort((a, b) => a[1] - b[1]);
+      const sheet = book.getSheetByName(name);
+      if (!sheet || sourceRows.length === 0) return;
+      sheet.getDataRange().clearContent();
+      const values = sourceRows.map((row) => JSON.parse(row[2]) as unknown[]);
+      const width = Math.max(...values.map((row) => row.length));
+      sheet.getRange(1, 1, values.length, width)
+        .setValues(values.map((row) => [...row, ...Array(width - row.length).fill('')]));
+    });
+  } finally {
+    invalidateSheetCache();
+  }
 }
 
 export function beginPublishedSettingsChange(reason: string): void {

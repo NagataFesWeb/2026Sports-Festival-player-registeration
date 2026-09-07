@@ -218,6 +218,7 @@
     ['同じ競技へ同じ生徒を2回入れない', 'MAX_PER_EVENT <= 1'],
     ['1人あたり2競技までにする', 'MAX_PER_STUDENT <= 2'],
     ['必要な枠を全部埋める', 'REQUIRED_EMPTY == 0'],
+    ['クラス全員を出す', 'UNIQUE >= CLASS_SIZE'],
   ];
   const EXPRESSION_WORDS = [
     ['M / F / N', '男子の人数 / 女子の人数 / 登録人数'],
@@ -230,6 +231,7 @@
     ['INVALID_ID', '生徒マスターにない学籍番号の登録数'],
     ['NAME_MISMATCH', '名簿と氏名が違う登録数（氏名入力のある旧回答のみ対象。学籍番号だけの回答では常0）'],
     ['CLASS_MISMATCH', '対象クラスと所属が違う登録数'],
+    ['CLASS_SIZE / CLASS_M / CLASS_F', '対象クラスの名簿の人数 / 名簿の男子人数 / 名簿の女子人数（登録内容ではなく生徒マスターから数える）'],
   ];
   const EXPRESSION_CAUTIONS = [
     '「等しい」は = ではなく == と二つ重ねます。',

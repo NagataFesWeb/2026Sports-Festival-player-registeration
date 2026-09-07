@@ -10,6 +10,7 @@ import {
   completeRuleOnlyChange,
   isRuleOnlyChangeActive,
 } from './settings-change-service';
+import { invalidateSheetCache } from './sheet-cache';
 
 const DECIDED: Submission['status'][] = ['APPROVED', 'APPLIED'];
 
@@ -44,6 +45,8 @@ export function applyRuleOnlyChange(): RuleChangeApplyResult {
   // 途中で届いたフォーム回答が古い内容で上書きされないようにする。
   const lock = LockService.getDocumentLock();
   if (!lock.tryLock(30_000)) throw new Error('ほかの担当者が処理中です。少し待ってから、もう一度実行してください。');
+  // ロックを取った直後は、ほかの担当者やトリガーが書いた内容を必ず読み直す。
+  invalidateSheetCache();
   try {
     return applyRuleOnlyChangeWithinLock();
   } finally {

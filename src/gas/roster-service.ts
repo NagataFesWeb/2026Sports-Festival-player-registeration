@@ -27,6 +27,7 @@ import {
 } from './repository';
 import { readEventSettings, readFormDesign, readRuleSettings } from './settings-repository';
 import { assertAuthorized } from './auth-service';
+import { invalidateSheetCache } from './sheet-cache';
 
 const ROSTER_FOLDER_NAME = '選手名簿';
 const ROSTER_JOB_PROPERTY = SCRIPT_PROPERTIES.playerRosterJob;
@@ -1131,6 +1132,8 @@ export function createPlayerRosters(inputName: string): CreateRosterResult {
   if (!lock.tryLock(30_000)) {
     throw new Error('ほかの担当者が処理中です。少し待ってから、もう一度実行してください。');
   }
+  // ロックを取った直後は、ほかの担当者やトリガーが書いた内容を必ず読み直す。
+  invalidateSheetCache();
 
   let versionFolder: GoogleAppsScript.Drive.Folder | undefined;
   let stagingName = '';
@@ -1336,6 +1339,8 @@ export function createPlayerRostersFromLatestVersion(): CreateRosterResult {
   if (!lock.tryLock(30_000)) {
     throw new Error('ほかの担当者が処理中です。少し待ってから、もう一度実行してください。');
   }
+  // ロックを取った直後は、ほかの担当者やトリガーが書いた内容を必ず読み直す。
+  invalidateSheetCache();
 
   let versionFolder: GoogleAppsScript.Drive.Folder | undefined;
   let stagingName = '';
@@ -1413,6 +1418,8 @@ export function createPlayerRostersFromLatestVersion(): CreateRosterResult {
 export function continuePlayerRosterCreation(): void {
   const lock = LockService.getDocumentLock();
   if (!lock.tryLock(30_000)) return;
+  // ロックを取った直後は、ほかの担当者やトリガーが書いた内容を必ず読み直す。
+  invalidateSheetCache();
   try {
     const state = loadRosterJob();
     if (!state) {
@@ -1507,6 +1514,8 @@ export function resumePlayerRosterCreation(): RosterJobStatus {
   assertAuthorized();
   const lock = LockService.getDocumentLock();
   if (!lock.tryLock(30_000)) throw new Error('名簿作成処理が動いています。少し待ってから状況を確認してください。');
+  // ロックを取った直後は、ほかの担当者やトリガーが書いた内容を必ず読み直す。
+  invalidateSheetCache();
   try {
     const state = loadRosterJob();
     if (!state) throw new Error('再開できる名簿作成はありません。新しい名簿を作成してください。');
@@ -1526,6 +1535,8 @@ export function cancelPlayerRosterCreation(): RosterJobStatus {
   assertAuthorized();
   const lock = LockService.getDocumentLock();
   if (!lock.tryLock(30_000)) throw new Error('名簿作成処理が動いています。少し待ってから取り消してください。');
+  // ロックを取った直後は、ほかの担当者やトリガーが書いた内容を必ず読み直す。
+  invalidateSheetCache();
   try {
     const state = loadRosterJob();
     if (!state) throw new Error('取り消す名簿作成はありません。');

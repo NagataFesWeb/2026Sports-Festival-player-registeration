@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import {
   evaluateRuleExpression,
+  referencedRuleVariables,
   RULE_EXPRESSION_VARIABLES,
   type RuleExpressionValues,
   validateRuleExpression,
@@ -10,6 +11,7 @@ const values = (overrides: Partial<RuleExpressionValues> = {}): RuleExpressionVa
   M: 2, F: 2, N: 4, UNKNOWN: 0, EMPTY: 0, REQUIRED_EMPTY: 0,
   UNIQUE: 4, DUPLICATE: 0, MAX_PER_STUDENT: 1, MAX_PER_EVENT: 1, INVALID_ID: 0,
   NAME_MISMATCH: 0, CLASS_MISMATCH: 0, PENDING: 0,
+  CLASS_SIZE: 40, CLASS_M: 20, CLASS_F: 20,
   ...overrides,
 });
 
@@ -30,5 +32,18 @@ describe('ルール論理式', () => {
     expect(validateRuleExpression('M; SpreadsheetApp')).toContain('使用できません');
     expect(validateRuleExpression('M + F')).toContain('TRUEまたはFALSE');
     expect(RULE_EXPRESSION_VARIABLES).toContain('MAX_PER_STUDENT');
+  });
+});
+
+describe('論理式が参照する変数', () => {
+  it('別名を解決し、重複なく出現順に返す', () => {
+    expect(referencedRuleVariables('unique >= 40 && MALE > 0 && M < 50')).toEqual(['UNIQUE', 'M']);
+    expect(referencedRuleVariables('=N == UNIQUE')).toEqual(['N', 'UNIQUE']);
+  });
+
+  it('未知の名前は含めず、壊れた論理式や空欄では空配列を返す', () => {
+    expect(referencedRuleVariables('BOY >= 2 && F == 0')).toEqual(['F']);
+    expect(referencedRuleVariables('')).toEqual([]);
+    expect(referencedRuleVariables('M >= 2 && ;')).toEqual([]);
   });
 });

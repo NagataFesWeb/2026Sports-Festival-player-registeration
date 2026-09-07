@@ -31,6 +31,7 @@ import {
 import { readEventSettings, readFormDesign, readFormRegistry, readRuleSettings } from './settings-repository';
 import { retryFailedFormResponses } from './form-response-service';
 import { revalidateAffectedSubmissions } from './service';
+import { invalidateSheetCache } from './sheet-cache';
 
 /**
  * 実機テスト。本物のGoogleフォームへ回答を投入し、取込と検査の結果が
@@ -632,6 +633,8 @@ export function cleanupLiveFormTest(): LiveFormTestCleanupResult {
   // テスト申請を消している途中に本物の回答が届くと、行番号がずれて別の申請を消しかねない。
   const lock = LockService.getDocumentLock();
   if (!lock.tryLock(30_000)) throw new Error('ほかの担当者が処理中です。少し待ってから、もう一度実行してください。');
+  // ロックを取った直後は、ほかの担当者やトリガーが書いた内容を必ず読み直す。
+  invalidateSheetCache();
   try {
     return cleanupLiveFormTestWithinLock();
   } finally {

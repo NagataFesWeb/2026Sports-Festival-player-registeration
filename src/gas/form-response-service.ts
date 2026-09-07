@@ -13,6 +13,7 @@ import { SCRIPT_PROPERTIES } from '../shared/constants';
 import { readEventSettings, readFormDesign, readFormRegistry } from './settings-repository';
 import { revalidateAffectedSubmissions } from './service';
 import { assertAuthorized } from './auth-service';
+import { invalidateSheetCache } from './sheet-cache';
 
 export interface GeneratedFormSubmitEvent {
   response: GoogleAppsScript.Forms.FormResponse;
@@ -42,6 +43,8 @@ export function handleGeneratedFormSubmitEvent(
 ): void {
   const lock = LockService.getDocumentLock();
   if (!lock.tryLock(lockWaitMilliseconds)) throw new Error('フォーム回答の取込が混み合っています。しばらくしてから再処理してください。');
+  // ロックを取った直後は、ほかの担当者やトリガーが書いた内容を必ず読み直す。
+  invalidateSheetCache();
   let rawRow = 0;
   let rawRecord: RawFormResponseRecord | undefined;
   let appendedSubmissionId = '';
