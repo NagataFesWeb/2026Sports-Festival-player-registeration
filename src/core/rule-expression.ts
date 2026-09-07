@@ -165,6 +165,26 @@ export function evaluateRuleExpression(expression: string, values: RuleExpressio
   return new Parser(cachedTokens(normalized), values).parse();
 }
 
+/**
+ * 論理式が参照している変数を、別名（MALE→M等）を解決したうえで重複なく返す。
+ * 論理式の意味は読まない。「人数を数える変数を使っているか」を見て、
+ * 成立しなかったときに未登録の生徒を並べるかどうかを決めるために使う。
+ * 論理式が壊れていて字句に分けられないときは空配列を返す。
+ */
+export function referencedRuleVariables(expression: string): RuleExpressionVariable[] {
+  const normalized = expression.normalize('NFKC').trim().replace(/^=\s*/, '');
+  if (!normalized) return [];
+  let tokens: Token[];
+  try { tokens = cachedTokens(normalized); } catch { return []; }
+  const known = new Set<string>(RULE_EXPRESSION_VARIABLES);
+  const found: RuleExpressionVariable[] = [];
+  tokens.filter((token) => token.type === 'IDENTIFIER').forEach((token) => {
+    const name = ALIASES[token.text] ?? token.text;
+    if (known.has(name) && !found.includes(name as RuleExpressionVariable)) found.push(name as RuleExpressionVariable);
+  });
+  return found;
+}
+
 export function validateRuleExpression(expression: string): string | undefined {
   const zeroValues = Object.fromEntries(RULE_EXPRESSION_VARIABLES.map((name) => [name, 0])) as RuleExpressionValues;
   try { evaluateRuleExpression(expression, zeroValues); return undefined; }

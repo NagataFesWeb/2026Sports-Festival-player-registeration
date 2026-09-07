@@ -10,7 +10,9 @@ import type {
 import { normalizeName, normalizeStudentId } from './normalization';
 import {
   evaluateRuleExpression,
+  referencedRuleVariables,
   type RuleExpressionValues,
+  type RuleExpressionVariable,
 } from './rule-expression';
 
 export const ISSUE_CODES = {
@@ -196,7 +198,7 @@ export function validateSubmission(
   }
 
   addExpressionRuleIssues(
-    submission, normalizedItems, studentsById, context.rules, addIssue,
+    submission, normalizedItems, studentsById, context.students, context.rules, addIssue,
   );
   addVacancyWarnings(normalizedItems, addIssue);
 
@@ -323,10 +325,51 @@ function offendingItems(
   return offending.length === targetItems.length ? [] : offending;
 }
 
+/** 人数を数える変数。論理式がこれらを使っていて「足りない」形で成立しないとき、未登録の生徒を並べる。 */
+const COUNT_VARIABLES: readonly RuleExpressionVariable[] = ['UNIQUE', 'N', 'M', 'F'];
+
+function genderMark(student: ValidationContext['students'][number]): string {
+  if (student.gender === 'M') return '（男）';
+  if (student.gender === 'F') return '（女）';
+  return '（性別不明）';
+}
+
+/**
+ * 「足りない」形で成立しなかった論理式（例：`UNIQUE >= 40`）に対して、
+ * 対象クラスの名簿のうち、そのルールの対象競技にまだ登録されていない生徒を並べる。
+ * 論理式が`M`だけを見ているなら男子だけ、`F`だけなら女子だけに絞る。
+ * 人数を数える変数を使っていない論理式では何も返さない。
+ */
+export function unregisteredStudentText(
+  submission: Submission,
+  targetItems: SubmissionItem[],
+  students: ValidationContext['students'],
+  expression: string,
+): string {
+  const counted = referencedRuleVariables(expression).filter((name) => COUNT_VARIABLES.includes(name));
+  if (counted.length === 0) return '';
+  const onlyMale = counted.every((name) => name === 'M');
+  const onlyFemale = counted.every((name) => name === 'F');
+  const registeredIds = new Set(targetItems
+    .filter((item) => item.registrationState === 'REGISTER')
+    .map((item) => item.normalizedStudentId)
+    .filter(Boolean));
+  const missing = students
+    .filter((student) => student.grade === submission.targetGrade && student.classNumber === submission.targetClass)
+    .filter((student) => !registeredIds.has(student.studentId))
+    .filter((student) => (onlyMale ? student.gender === 'M' : onlyFemale ? student.gender === 'F' : true))
+    .sort((left, right) => left.attendanceNumber - right.attendanceNumber || left.studentId.localeCompare(right.studentId));
+  const label = onlyMale ? '未登録の男子' : onlyFemale ? '未登録の女子' : '未登録の生徒';
+  if (missing.length === 0) return `\n${label}：なし（対象クラスの名簿にいる全員が登録済みです）`;
+  return `\n${label}（${missing.length}人）：`
+    + missing.map((student) => `${student.studentId} ${student.name}${genderMark(student)}`).join('、');
+}
+
 function addExpressionRuleIssues(
   submission: Submission,
   items: SubmissionItem[],
   studentsById: Map<string, ValidationContext['students'][number]>,
+  students: ValidationContext['students'],
   rules: RuleSetting[] | undefined,
   addIssue: (
     code: IssueCode, severity: Severity, item: SubmissionItem | undefined,
@@ -353,6 +396,10 @@ function addExpressionRuleIssues(
       const culpritText = culprits.length > 0
         ? `直す枠：${culprits.map((item) => `${item.eventName} / ${item.slotName}`).join('、')}。`
         : '足りない条件を満たすように、対象競技の登録を見直してください。';
+      // 「足りない」形のときだけ、誰を足せばよいかの手がかりとして未登録の生徒を並べる。
+      const missingText = culprits.length === 0
+        ? unregisteredStudentText(submission, targetItems, students, rule.expression ?? '')
+        : '';
       addIssue(
         ISSUE_CODES.RULE_EXPRESSION_FALSE,
         rule.judgment === '警告' ? 'WARNING' : 'ERROR',
@@ -361,7 +408,7 @@ function addExpressionRuleIssues(
         {
           displayTitle: rule.displayMessage.trim() || `「${ruleLabel}」を満たしていません`,
           locationText: eventNames.length > 0 ? eventNames.join('、') : '対象競技',
-          fixInstruction: `${culpritText}ルール：${ruleLabel} / 論理式：${rule.expression}`,
+          fixInstruction: `${culpritText}ルール：${ruleLabel} / 論理式：${rule.expression}${missingText}`,
           relatedItemIds: culprits.map((item) => item.submissionItemId).join(','),
         },
       );

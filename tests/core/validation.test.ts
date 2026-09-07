@@ -303,3 +303,78 @@ describe('validateSubmission', () => {
     expect(issue?.fixInstruction).toContain('半角数字4桁');
   });
 });
+
+describe('足りない形の論理式で未登録の生徒を示す', () => {
+  const classStudents = students.filter((student) => student.grade === 1 && student.classNumber === 1);
+  const uniqueRule: RuleSetting = {
+    ...duplicateRule, ruleId: 'R-ALL', ruleName: 'クラス全員を出す',
+    displayMessage: 'クラス全員を登録してください', expression: 'UNIQUE >= 40',
+  };
+  const twoItems = [
+    item(),
+    item({ submissionItemId: 'item-002', slotId: 'slot-002', slotName: '第2走者', studentIdInput: '1102', studentNameInput: '' }),
+  ];
+
+  it('UNIQUE >= 40 が成立しないとき、対象競技に登録されていないクラスの生徒を出席番号順に並べる', () => {
+    const result = validateSubmission(submission(), twoItems,
+      { students, sameClassInitialSubmissionCount: 1, rules: [uniqueRule] });
+    const issue = result.issues.find((candidate) => candidate.issueCode === ISSUE_CODES.RULE_EXPRESSION_FALSE);
+    expect(issue?.fixInstruction).toContain(`未登録の生徒（${classStudents.length - 2}人）：`);
+    expect(issue?.fixInstruction).not.toContain('1101 ');
+    expect(issue?.fixInstruction).not.toContain('1102 ');
+    const third = classStudents.find((student) => student.studentId === '1103')!;
+    expect(issue?.fixInstruction).toContain(`1103 ${third.name}（${third.gender === 'M' ? '男' : '女'}）`);
+    const listed = (issue?.fixInstruction ?? '').split('未登録の生徒')[1] ?? '';
+    const ids = [...listed.matchAll(/(1[1-8][0-9]{2}) /g)].map((match) => match[1]);
+    expect(ids).toEqual(classStudents.filter((student) => !['1101', '1102'].includes(student.studentId))
+      .map((student) => student.studentId));
+    expect(issue?.relatedItemIds).toBe('');
+  });
+
+  it('出場しない枠と別クラスの生徒は登録済みに数えない', () => {
+    const result = validateSubmission(submission(), [
+      item({ registrationState: 'NOT_PARTICIPATING', required: false }),
+      item({ submissionItemId: 'item-002', slotId: 'slot-002', studentIdInput: '1201', studentNameInput: '' }),
+    ], { students, sameClassInitialSubmissionCount: 1, rules: [uniqueRule] });
+    const issue = result.issues.find((candidate) => candidate.issueCode === ISSUE_CODES.RULE_EXPRESSION_FALSE);
+    expect(issue?.fixInstruction).toContain(`未登録の生徒（${classStudents.length}人）：`);
+    expect(issue?.fixInstruction).toContain('1101 ');
+  });
+
+  it('男子だけを数える論理式では未登録の男子だけを並べる', () => {
+    const maleRule: RuleSetting = { ...uniqueRule, ruleId: 'R-MALE', expression: 'M >= 30' };
+    const result = validateSubmission(submission(), twoItems,
+      { students, sameClassInitialSubmissionCount: 1, rules: [maleRule] });
+    const issue = result.issues.find((candidate) => candidate.issueCode === ISSUE_CODES.RULE_EXPRESSION_FALSE);
+    const expected = classStudents.filter((student) => student.gender === 'M' && !['1101', '1102'].includes(student.studentId));
+    expect(issue?.fixInstruction).toContain(`未登録の男子（${expected.length}人）：`);
+    expect(issue?.fixInstruction).not.toContain('（女）');
+  });
+
+  it('直す枠が絞れる論理式や、人数を数えない論理式では未登録の生徒を並べない', () => {
+    const noMaleRule: RuleSetting = { ...uniqueRule, ruleId: 'R-NOMALE', expression: 'M == 0' };
+    const tooMany = validateSubmission(submission(), twoItems,
+      { students, sameClassInitialSubmissionCount: 1, rules: [noMaleRule] });
+    const tooManyIssue = tooMany.issues.find((candidate) => candidate.issueCode === ISSUE_CODES.RULE_EXPRESSION_FALSE);
+    if (tooManyIssue) expect(tooManyIssue.fixInstruction).not.toContain('未登録');
+
+    const pendingRule: RuleSetting = { ...uniqueRule, ruleId: 'R-PENDING', expression: 'PENDING == 0' };
+    const pending = validateSubmission(submission(), [item({ registrationState: 'PENDING' })],
+      { students, sameClassInitialSubmissionCount: 1, rules: [pendingRule] });
+    const pendingIssue = pending.issues.find((candidate) => candidate.issueCode === ISSUE_CODES.RULE_EXPRESSION_FALSE);
+    expect(pendingIssue).toBeDefined();
+    expect(pendingIssue?.fixInstruction).not.toContain('未登録');
+  });
+
+  it('クラス全員が登録済みなら「なし」と示す', () => {
+    const allItems = classStudents.map((student, index) => item({
+      submissionItemId: `item-${index}`, slotId: `slot-${index}`, slotName: `${index + 1}番`,
+      studentIdInput: student.studentId, studentNameInput: '',
+    }));
+    const strictRule: RuleSetting = { ...uniqueRule, expression: `UNIQUE >= ${classStudents.length + 1}` };
+    const result = validateSubmission(submission(), allItems,
+      { students, sameClassInitialSubmissionCount: 1, rules: [strictRule] });
+    const issue = result.issues.find((candidate) => candidate.issueCode === ISSUE_CODES.RULE_EXPRESSION_FALSE);
+    expect(issue?.fixInstruction).toContain('未登録の生徒：なし');
+  });
+});

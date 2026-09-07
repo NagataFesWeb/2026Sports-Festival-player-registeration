@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import {
   evaluateRuleExpression,
+  referencedRuleVariables,
   RULE_EXPRESSION_VARIABLES,
   type RuleExpressionValues,
   validateRuleExpression,
@@ -30,5 +31,18 @@ describe('ルール論理式', () => {
     expect(validateRuleExpression('M; SpreadsheetApp')).toContain('使用できません');
     expect(validateRuleExpression('M + F')).toContain('TRUEまたはFALSE');
     expect(RULE_EXPRESSION_VARIABLES).toContain('MAX_PER_STUDENT');
+  });
+});
+
+describe('論理式が参照する変数', () => {
+  it('別名を解決し、重複なく出現順に返す', () => {
+    expect(referencedRuleVariables('unique >= 40 && MALE > 0 && M < 50')).toEqual(['UNIQUE', 'M']);
+    expect(referencedRuleVariables('=N == UNIQUE')).toEqual(['N', 'UNIQUE']);
+  });
+
+  it('未知の名前は含めず、壊れた論理式や空欄では空配列を返す', () => {
+    expect(referencedRuleVariables('BOY >= 2 && F == 0')).toEqual(['F']);
+    expect(referencedRuleVariables('')).toEqual([]);
+    expect(referencedRuleVariables('M >= 2 && ;')).toEqual([]);
   });
 });
