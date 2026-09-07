@@ -187,6 +187,17 @@ function resolveMockRoster(): { source: MockRosterSource; students: Student[] } 
 }
 
 export function initializeDevelopmentWorkbookData(): DashboardData {
+  // 申請・項目・回答原本を丸ごと作り直すので、取込トリガーと同時に動かさない。
+  const lock = LockService.getDocumentLock();
+  if (!lock.tryLock(30_000)) throw new Error('ほかの担当者が処理中です。少し待ってから、もう一度実行してください。');
+  try {
+    return createDevelopmentWorkbookData();
+  } finally {
+    lock.releaseLock();
+  }
+}
+
+function createDevelopmentWorkbookData(): DashboardData {
   assertAuthorized();
   assertDevelopmentMode();
   ensureApplicationSheets();
@@ -218,7 +229,7 @@ export function initializeDevelopmentWorkbookData(): DashboardData {
   replaceRawFormResponses(generated.rawResponses);
   replaceIssues([]);
   resetApprovalHistory();
-  const result = revalidateAllSubmissions();
+  const result = revalidateAllSubmissionsWithinLock();
   writeDashboard(result);
   return generated.notices.length > 0 ? { ...result, mockGenerationNotices: generated.notices } : result;
 }
@@ -280,7 +291,7 @@ export function addDevelopmentMockCorrectionSubmissions(count: number): Addition
     replaceSubmissions([...beforeSubmissions, ...generated.submissions]);
     replaceItems([...beforeItems, ...generated.items]);
     replaceRawFormResponses([...beforeRawResponses, ...generated.rawResponses]);
-    const dashboard = revalidateAllSubmissions();
+    const dashboard = revalidateAllSubmissionsWithinLock();
     return {
       addedCount: generated.submissions.length,
       pendingCount: dashboard.pending,
@@ -331,7 +342,14 @@ export function prepareRealFormTestData(): DashboardData {
   }
 }
 
-export function revalidateAllSubmissions(): DashboardData {
+/**
+ * すべての申請を検査し直す。`申請項目`・`検査結果`・`承認待ち`の3シートを丸ごと
+ * 書き換えるため、必ずドキュメントロックを持っている間だけ呼ぶ。
+ * ロックの外で呼ぶと、読み込みから書き戻しまでの間に届いたフォーム回答を
+ * 古い内容で上書きし、`フォーム回答原本`が取込済みのまま申請だけが消える。
+ * ロックを持っていない呼び出し側は`revalidateAllSubmissions()`を使う。
+ */
+export function revalidateAllSubmissionsWithinLock(): DashboardData {
   assertAuthorized();
   const submissions = readSubmissions();
   assertMockRosterSourceConsistent(submissions);
@@ -362,9 +380,23 @@ export function revalidateAllSubmissions(): DashboardData {
   return data;
 }
 
+/** メニューなど、ロックを持たない場所からの全再検査。取込との衝突を待って防ぐ。 */
+export function revalidateAllSubmissions(): DashboardData {
+  const lock = LockService.getDocumentLock();
+  if (!lock.tryLock(30_000)) throw new Error('ほかの担当者が処理中です。少し待ってから、もう一度実行してください。');
+  try {
+    return revalidateAllSubmissionsWithinLock();
+  } finally {
+    lock.releaseLock();
+  }
+}
+
 /**
  * Revalidates only the requested submissions and the initial submissions in the
  * same classes whose duplicate-answer warning can change as a consequence.
+ *
+ * 対象行だけを書き換えるが、読み込みから書き戻しまでの間に届いた回答とは競合する。
+ * 呼び出し側がドキュメントロックを持っている間だけ呼ぶこと。
  */
 export function revalidateAffectedSubmissions(submissionIds: string[]): DashboardData {
   assertAuthorized();

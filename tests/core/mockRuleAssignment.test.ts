@@ -12,13 +12,19 @@ const baseEvent: EventSetting = {
 
 function slots(
   formType: FormRegistryRow['formType'], formId: string, eventId: string,
-  count: number, displayStart: number,
+  count: number, displayStart: number, includeState = false,
 ): FormRegistryRow[] {
   const prefix = formType === 'correction' ? 'correction_' : '';
   return Array.from({ length: count }, (_, offset) => {
     const slot = String(offset + 1).padStart(2, '0');
     const base = `${prefix}${eventId}_slot${slot}`;
     return [
+      // 欠員許可の競技だけ、フォームに登録状態の質問が並ぶ。
+      ...(includeState ? [{
+        formType, formId, itemId: `${eventId}-state-${slot}`, fieldKey: `${base}_state`,
+        eventId, title: base, itemType: 'multiple_choice', displayOrder: displayStart + offset * 10,
+        enabled: true,
+      }] : []),
       {
         formType, formId, itemId: `${eventId}-id-${slot}`, fieldKey: `${base}_student_id`,
         eventId, title: base, itemType: 'text', displayOrder: displayStart + offset * 10 + 1,
@@ -278,5 +284,210 @@ describe('ルール設定を読む疑似データ生成', () => {
       expect(genders).toHaveLength(4);
       expect(new Set(genders).size).toBe(1);
     }
+  });
+  describe('欠員許可を考慮した割り当て', () => {
+    /** 欠員許可の競技だけで構成した疑似申請を1件作り、検査結果と一緒に返す。 */
+    function generateVacancy(spec: Array<[string, string, number]>, rules: RuleSetting[]): {
+      filled: number; vacant: number; errorCount: number; notices: string[];
+    } {
+      const students = generateMockStudents();
+      const generated = generateMockSubmissions({
+        year: 2026, normalFormId: 'normal-form', correctionFormId: 'correction-form',
+        normalRegistry: spec.flatMap(([eventId, , count], offset) =>
+          slots('normal', 'normal-form', eventId, count, offset * 1_000, true)),
+        correctionRegistry: slots('correction', 'correction-form', spec[0]![0], spec[0]![2], 1, true),
+        events: spec.map(([eventId, eventName, requiredCount], offset) => ({
+          ...baseEvent, eventId, eventName, requiredCount, vacancyAllowed: true,
+          displayOrder: offset + 1,
+        })),
+        students, rules,
+      }, {
+        submissionCount: 1, targetGrades: [1], targetClasses: [1], targetFormTypes: ['normal'],
+        errorSubmissionCount: 0, warningSubmissionCount: 0,
+      });
+      const validation = validateSubmission(generated.submissions[0]!, generated.items, {
+        students, sameClassInitialSubmissionCount: 1, rules,
+      });
+      return {
+        filled: generated.items.filter((item) => item.registrationState === 'REGISTER').length,
+        vacant: generated.items
+          .filter((item) => item.registrationState === 'NOT_PARTICIPATING').length,
+        errorCount: validation.errorCount,
+        notices: generated.notices,
+      };
+    }
+
+    const equalGenders = (ruleId: string, eventIds: string): RuleSetting => ({
+      ruleId, enabled: true, ruleName: '男女同数', target: '指定競技',
+      targetEventIds: eventIds, condition: '', limit: 0, judgment: 'エラー',
+      displayMessage: '男女同数で登録してください', note: '', expression: 'M == F',
+    });
+    const atLeast = (ruleId: string, eventIds: string, total: number): RuleSetting => ({
+      ruleId, enabled: true, ruleName: `最低${total}人`, target: '指定競技',
+      targetEventIds: eventIds, condition: '', limit: 0, judgment: 'エラー',
+      displayMessage: `${total}人以上を登録してください`, note: '', expression: `N >= ${total}`,
+    });
+
+    /** 前半・後半に片方しか出られない大縄跳び。枠の合計がクラスの人数を5つ超える。 */
+    const JUMP_RULES: RuleSetting[] = [{
+      ruleId: 'R400', enabled: true, ruleName: '大縄跳び片方出場制限', target: '指定競技',
+      targetEventIds: 'E400,E401', condition: '', limit: 0, judgment: 'エラー',
+      displayMessage: '大縄跳びの前半・後半の片方のみに出場可能です', note: '',
+      expression: 'MAX_PER_STUDENT <= 1',
+    }];
+
+    function generateJump(vacancyAllowed: boolean, errorSubmissionCount: number): {
+      students: ReturnType<typeof generateMockStudents>;
+      generated: ReturnType<typeof generateMockSubmissions>;
+    } {
+      const students = generateMockStudents();
+      const classSize = students
+        .filter((student) => student.grade === 1 && student.classNumber === 1).length;
+      const spec: Array<[string, string, number]> = [
+        ['E400', '大縄跳び 前半', 20], ['E401', '大縄跳び 後半', classSize - 20 + 5],
+      ];
+      const generated = generateMockSubmissions({
+        year: 2026, normalFormId: 'normal-form', correctionFormId: 'correction-form',
+        normalRegistry: spec.flatMap(([eventId, , count], offset) =>
+          slots('normal', 'normal-form', eventId, count, offset * 1_000, vacancyAllowed)),
+        correctionRegistry: slots('correction', 'correction-form', 'E400', 20, 1, vacancyAllowed),
+        events: spec.map(([eventId, eventName, requiredCount], offset) => ({
+          ...baseEvent, eventId, eventName, requiredCount, vacancyAllowed, displayOrder: offset + 1,
+        })),
+        students, rules: JUMP_RULES,
+      }, {
+        submissionCount: 1, targetGrades: [1], targetClasses: [1], targetFormTypes: ['normal'],
+        errorSubmissionCount, warningSubmissionCount: 0,
+      });
+      return { students, generated };
+    }
+
+    it('欠員許可の枠は、誰を入れてもルールを破るなら空けて警告だけにする', () => {
+      const { students, generated } = generateJump(true, 0);
+      const validation = validateSubmission(generated.submissions[0]!, generated.items, {
+        students, sameClassInitialSubmissionCount: 1, rules: JUMP_RULES,
+      });
+      expect(validation.errorCount).toBe(0);
+      expect(validation.issues.map((issue) => issue.issueCode))
+        .toEqual([ISSUE_CODES.VACANCY_CAPACITY_SHORTFALL]);
+      expect(generated.notices).toEqual([]);
+      // 空けたのは超過した5枠だけ。埋められる枠は埋めたままにする。
+      expect(generated.items.filter((item) => item.registrationState === 'NOT_PARTICIPATING'))
+        .toHaveLength(5);
+    });
+
+    it('欠員を許可していない同じ競技では、空けずにルール違反として知らせる', () => {
+      const { students, generated } = generateJump(false, 0);
+      const validation = validateSubmission(generated.submissions[0]!, generated.items, {
+        students, sameClassInitialSubmissionCount: 1, rules: JUMP_RULES,
+      });
+      expect(generated.items.every((item) => item.studentIdInput !== '')).toBe(true);
+      expect(validation.issues.map((issue) => issue.issueCode))
+        .toContain(ISSUE_CODES.RULE_EXPRESSION_FALSE);
+      expect(generated.notices.join('\n')).toContain('ルールを満たす割り当てが見つかりませんでした');
+    });
+
+    it('枠を空けたあとでも、意図的なエラーの疑似申請はルールを破って作れる', () => {
+      const { students, generated } = generateJump(true, 1);
+      const validation = validateSubmission(generated.submissions[0]!, generated.items, {
+        students, sameClassInitialSubmissionCount: 1, rules: JUMP_RULES,
+      });
+      expect(validation.errorCount).toBeGreaterThan(0);
+      expect(generated.notices.join('\n')).toContain('R400｜大縄跳び片方出場制限 を破る');
+    });
+
+    it('途中の集計だけを見て枠を空けない。男女同数のルールでも全枠を埋める', () => {
+      // 1枠目を埋めた時点では`M == F`が崩れるが、4枠そろえば成立する。
+      // 決めかけの状態で空けると、空けたほうが成立して見えて全枠が空いてしまう。
+      const result = generateVacancy([['E200', '男女混合リレー', 4]], [equalGenders('R500', 'E200')]);
+      expect(result.filled).toBe(4);
+      expect(result.vacant).toBe(0);
+      expect(result.errorCount).toBe(0);
+      expect(result.notices).toEqual([]);
+    });
+
+    it('登録人数の下限（N >= x）を、複数競技をまたいでも満たす', () => {
+      const result = generateVacancy(
+        [['E200', '男女混合リレー 前', 4], ['E201', '男女混合リレー 後', 4]],
+        [equalGenders('R500', 'E200'), equalGenders('R501', 'E201'),
+          atLeast('R502', 'E200,E201', 8)],
+      );
+      expect(result.filled).toBe(8);
+      expect(result.vacant).toBe(0);
+      expect(result.errorCount).toBe(0);
+      expect(result.notices).toEqual([]);
+    });
+
+    it('枠を空けるルールと登録人数の下限があっても、両方を満たす', () => {
+      const students = generateMockStudents();
+      const classSize = students
+        .filter((student) => student.grade === 1 && student.classNumber === 1).length;
+      // 44枠・39人。5枠を空ければ`MAX_PER_STUDENT <= 1`と`N >= 36`の両方が成り立つ。
+      const result = generateVacancy(
+        [['E400', '大縄跳び 前半', 20], ['E401', '大縄跳び 後半', classSize - 20 + 5]],
+        [...JUMP_RULES, atLeast('R402', 'E400,E401', 36)],
+      );
+      expect(result.filled).toBe(classSize);
+      expect(result.vacant).toBe(5);
+      expect(result.errorCount).toBe(0);
+      expect(result.notices).toEqual([]);
+    });
+
+    it('空けても下限を満たせないルールは、空けずに満たせなかったと知らせる', () => {
+      const students = generateMockStudents();
+      const classSize = students
+        .filter((student) => student.grade === 1 && student.classNumber === 1).length;
+      // `N >= 40`はクラスの人数を超えるので、`MAX_PER_STUDENT <= 1`と両立しない。
+      const result = generateVacancy(
+        [['E400', '大縄跳び 前半', 20], ['E401', '大縄跳び 後半', classSize - 20 + 5]],
+        [...JUMP_RULES, atLeast('R402', 'E400,E401', classSize + 1)],
+      );
+      expect(result.vacant).toBe(0);
+      expect(result.errorCount).toBeGreaterThan(0);
+      expect(result.notices.join('\n')).toContain('ルールを満たす割り当てが見つかりませんでした');
+    });
+
+    it('欠員許可にしてもフォームへ登録状態の質問が無ければ、枠を空けられないので停止する', () => {
+      const students = generateMockStudents();
+      const classSize = students
+        .filter((student) => student.grade === 1 && student.classNumber === 1).length;
+      const requiredCount = classSize + 1;
+      // 競技設定を`欠員許可=TRUE`にしたあと、フォーム下書きを作り直していない状態。
+      const build = (): unknown => generateMockSubmissions({
+        year: 2026, normalFormId: 'normal-form', correctionFormId: 'correction-form',
+        normalRegistry: slots('normal', 'normal-form', 'E300', requiredCount, 0),
+        correctionRegistry: slots('correction', 'correction-form', 'E300', requiredCount, 0),
+        events: [{ ...baseEvent, eventId: 'E300', eventName: '玉入れ', requiredCount,
+          vacancyAllowed: true, displayOrder: 1 }],
+        students, rules: [],
+      }, {
+        submissionCount: 1, targetGrades: [1], targetClasses: [1], targetFormTypes: ['normal'],
+        errorSubmissionCount: 0, warningSubmissionCount: 0,
+      });
+      expect(build).toThrow('「出場しない」を選べない登録枠');
+      expect(build).toThrow('フォーム下書きも作り直してください');
+    });
+
+    it('全員を埋められる欠員許可の競技は、空けずに全枠を埋める', () => {
+      const students = generateMockStudents();
+      const rules = GENDER_RULES.filter((rule) => rule.ruleId === 'R300');
+      const generated = generateMockSubmissions({
+        year: 2026, normalFormId: 'normal-form', correctionFormId: 'correction-form',
+        normalRegistry: slots('normal', 'normal-form', 'E300', 10, 0, true),
+        correctionRegistry: slots('correction', 'correction-form', 'E300', 10, 0, true),
+        events: [{ ...baseEvent, eventId: 'E300', eventName: '玉入れ', requiredCount: 10,
+          vacancyAllowed: true, displayOrder: 1 }],
+        students, rules,
+      }, {
+        submissionCount: 1, targetGrades: [1], targetClasses: [1], targetFormTypes: ['normal'],
+        errorSubmissionCount: 0, warningSubmissionCount: 0,
+      });
+      const validation = validateSubmission(generated.submissions[0]!, generated.items, {
+        students, sameClassInitialSubmissionCount: 1, rules,
+      });
+      expect(generated.items.every((item) => item.studentIdInput !== '')).toBe(true);
+      expect(validation.errorCount).toBe(0);
+      expect(validation.warningCount).toBe(0);
+    });
   });
 });

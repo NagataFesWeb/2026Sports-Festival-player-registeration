@@ -27,9 +27,21 @@ export interface FormResponseRetryResult {
   message: string;
 }
 
-export function handleGeneratedFormSubmitEvent(event: GeneratedFormSubmitEvent): void {
+/**
+ * 送信トリガーからの取込がロックを待つ時間。待っている人がいない裏の処理なので、
+ * 全再検査や名簿作成が終わるのを長めに待ち、取込の取りこぼしを減らす。
+ * トリガーの実行上限（6分）を超えないよう3分で切り上げる。
+ */
+const SUBMIT_LOCK_WAIT_MILLISECONDS = 180_000;
+/** 再処理は1回の実行で複数件を処理するため、1件あたりの待ち時間は短くする。 */
+const RETRY_LOCK_WAIT_MILLISECONDS = 30_000;
+
+export function handleGeneratedFormSubmitEvent(
+  event: GeneratedFormSubmitEvent,
+  lockWaitMilliseconds: number = SUBMIT_LOCK_WAIT_MILLISECONDS,
+): void {
   const lock = LockService.getDocumentLock();
-  if (!lock.tryLock(30_000)) throw new Error('フォーム回答の取込が混み合っています。しばらくしてから再処理してください。');
+  if (!lock.tryLock(lockWaitMilliseconds)) throw new Error('フォーム回答の取込が混み合っています。しばらくしてから再処理してください。');
   let rawRow = 0;
   let rawRecord: RawFormResponseRecord | undefined;
   let appendedSubmissionId = '';
@@ -131,7 +143,7 @@ export function retryFailedFormResponses(limit = 25): FormResponseRetryResult {
   let failedCount = 0;
   candidates.slice(0, cappedLimit).forEach((event) => {
     try {
-      handleGeneratedFormSubmitEvent(event);
+      handleGeneratedFormSubmitEvent(event, RETRY_LOCK_WAIT_MILLISECONDS);
       processedCount += 1;
     } catch {
       failedCount += 1;

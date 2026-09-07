@@ -643,6 +643,31 @@ function writeClassDistributionPdf(
 ): CreatedRosterFile {
   const fileName = `${versionName}_クラス配布用選手名簿`;
   const presentation = SlidesApp.create(`${fileName}_PDF生成用`);
+  // PDFへの変換や保存が途中で失敗しても、氏名と学籍番号が入ったPDF生成用スライドを
+  // Driveへ残さない。作成直後から必ず後片付けの対象にする。
+  const temporary = DriveApp.getFileById(presentation.getId());
+  try {
+    renderClassDistributionSlides(
+      presentation, versionName, registrations, students, createdAt, correctionSubmissionIds,
+    );
+    presentation.saveAndClose();
+    const pdf = versionFolder.createFile(
+      temporary.getAs('application/pdf').setName(`${fileName}.pdf`),
+    );
+    return { name: 'クラス配布用PDF', url: pdf.getUrl() };
+  } finally {
+    temporary.setTrashed(true);
+  }
+}
+
+function renderClassDistributionSlides(
+  presentation: GoogleAppsScript.Slides.Presentation,
+  versionName: string,
+  registrations: Registration[],
+  students: Student[],
+  createdAt: string,
+  correctionSubmissionIds: Set<string>,
+): void {
   const pages = buildClassDistributionPages(registrations, students);
   const firstSlide = presentation.getSlides()[0]!;
   pages.forEach((page, pageIndex) => {
@@ -692,13 +717,6 @@ function writeClassDistributionPdf(
     firstSlide.getPageElements().forEach((element) => element.remove());
     addSlideText(firstSlide, '配布対象のクラスがありません。', 30, 30, 650, 50, 18, true);
   }
-  presentation.saveAndClose();
-  const temporary = DriveApp.getFileById(presentation.getId());
-  const pdf = versionFolder.createFile(
-    temporary.getAs('application/pdf').setName(`${fileName}.pdf`),
-  );
-  temporary.setTrashed(true);
-  return { name: 'クラス配布用PDF', url: pdf.getUrl() };
 }
 
 function writeReport(

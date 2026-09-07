@@ -2,7 +2,7 @@ import { SHEETS } from '../shared/constants';
 import type { Submission } from '../shared/types';
 import { assertAuthorized } from './auth-service';
 import { readSubmissions } from './repository';
-import { revalidateAllSubmissions } from './service';
+import { revalidateAllSubmissionsWithinLock } from './service';
 import { validateAndRenderSettings } from './settings-service';
 import {
   beginRuleOnlyChange,
@@ -40,6 +40,18 @@ export function startRuleOnlyChange(reason: string): RuleChangeStartResult {
  * 承認済み・反映済みの申請は状態を変えず、警告・エラー件数だけを更新する。
  */
 export function applyRuleOnlyChange(): RuleChangeApplyResult {
+  // ルールの確定と全再検査を1つのロックの中で行う。受付を止めないまま実行するため、
+  // 途中で届いたフォーム回答が古い内容で上書きされないようにする。
+  const lock = LockService.getDocumentLock();
+  if (!lock.tryLock(30_000)) throw new Error('ほかの担当者が処理中です。少し待ってから、もう一度実行してください。');
+  try {
+    return applyRuleOnlyChangeWithinLock();
+  } finally {
+    lock.releaseLock();
+  }
+}
+
+function applyRuleOnlyChangeWithinLock(): RuleChangeApplyResult {
   assertAuthorized();
   if (!isRuleOnlyChangeActive()) {
     throw new Error('ルール設定の変更は始まっていません。先に「ルール設定だけを変更する」を実行してください。');
@@ -52,7 +64,7 @@ export function applyRuleOnlyChange(): RuleChangeApplyResult {
     );
   }
   const { ruleSettingsChanged } = completeRuleOnlyChange();
-  revalidateAllSubmissions();
+  revalidateAllSubmissionsWithinLock();
   const submissions = readSubmissions();
   const errorSubmissions = submissions.filter((submission) => submission.errorCount > 0).length;
   const warningSubmissions = submissions.filter((submission) =>

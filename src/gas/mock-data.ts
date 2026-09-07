@@ -1,6 +1,7 @@
 import { convertFormAnswer } from '../core/form-response';
 import {
   assignMockStudents,
+  canLeaveVacant,
   findRuleViolationCandidates,
   type MockAssignmentInput,
   type MockSlot,
@@ -383,13 +384,21 @@ function makeScenario(
     classNumber,
     studentOffset,
   };
-  const assignment = assignMockStudents(assignmentInput);
+  const slotKeys = mappings.map((mapping) => slotAssignmentKey(mapping));
+  // 同じクラスの通常回答で全部の枠が決まっているなら、割り当てをやり直さない。
+  // 疑似データ作成の時間はほとんどが割り当てなので、修正回答でここを飛ばせるかが所要時間を決める。
+  const reusesEverySlot = Boolean(reuse)
+    && slotKeys.every((key) => key !== '' && reuse!.has(key));
+  const assignment = reusesEverySlot
+    ? { studentIds: slotKeys.map((key) => reuse!.get(key)!), unsatisfiedRules: [] }
+    : assignMockStudents(assignmentInput);
   const notices = assignment.unsatisfiedRules.map((rule) =>
     `${grade}年${classNumber}組：ルールを満たす割り当てが見つかりませんでした。${rule}`);
-  const slotKeys = mappings.map((mapping) => slotAssignmentKey(mapping));
-  // 同じクラスの通常回答で決まっている枠は、その選手をそのまま使う。
-  const studentIds = assignment.studentIds.map((studentId, index) =>
-    reuse?.get(slotKeys[index] ?? '') ?? studentId);
+  // 同じクラスの通常回答で決まっている枠は、その選手をそのまま使う。空けた枠も空けたままにする。
+  const studentIds = assignment.studentIds.map((studentId, index) => {
+    const key = slotKeys[index] ?? '';
+    return reuse?.has(key) === true ? reuse.get(key)! : studentId;
+  });
 
   const applyStudentIds = (studentIds: readonly string[]): void => {
     mappings.forEach((mapping, index) => {
@@ -434,9 +443,10 @@ function makeScenario(
     },
     notices,
     problemLabel,
+    // 空けた枠も`''`のまま残す。修正回答へ「ここは出場しない」までそろえるために使う。
     slotAssignments: new Map(slotKeys
       .map((key, index) => [key, studentIds[index] ?? ''] as const)
-      .filter(([key, studentId]) => key !== '' && studentId !== '')),
+      .filter(([key]) => key !== '')),
   };
 }
 
@@ -527,7 +537,7 @@ function matchesIntent(context: IntentionalProblemContext, kind: ProblemIntent['
 }
 
 /**
- * 同じ競技へ同じ生徒は登録できないので、欠員不可の枠がクラスの人数を超えていたら作れない。
+ * 同じ競技へ同じ生徒は登録できないので、空けられない枠がクラスの人数を超えていたら作れない。
  * これはルールの satisfiability ではなく物理的な不足なので、ここだけは止める。
  */
 function assertClassCanFillEvents(
@@ -537,7 +547,7 @@ function assertClassCanFillEvents(
   classNumber: number,
 ): void {
   const requiredByEvent = new Map<string, { name: string; count: number }>();
-  slots.filter((slot) => !slot.vacancyAllowed).forEach((slot) => {
+  slots.filter((slot) => !canLeaveVacant(slot)).forEach((slot) => {
     const current = requiredByEvent.get(slot.eventId) ?? { name: slot.eventName, count: 0 };
     current.count += 1;
     requiredByEvent.set(slot.eventId, current);
@@ -545,7 +555,7 @@ function assertClassCanFillEvents(
   for (const [eventId, event] of requiredByEvent) {
     if (event.count <= studentCount) continue;
     throw new Error(
-      `${grade}年${classNumber}組の「${event.name}（${eventId}）」は、欠員を許可していない登録枠が${event.count}人分あるのに、クラスの生徒は${studentCount}人です。同じ競技へ同じ生徒は登録できないため、疑似データを作れません。競技設定の必要人数か欠員許可を確認してください。疑似データは書き換えていません。`,
+      `${grade}年${classNumber}組の「${event.name}（${eventId}）」は、「出場しない」を選べない登録枠が${event.count}人分あるのに、クラスの生徒は${studentCount}人です。同じ競技へ同じ生徒は登録できないため、疑似データを作れません。競技設定の必要人数か欠員許可を確認してください。欠員許可を変えた場合は、フォーム下書きも作り直してください。疑似データは書き換えていません。`,
     );
   }
 }

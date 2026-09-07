@@ -68,6 +68,15 @@ interface RuleScope {
 type SlotStudentIdReader = (slotIndex: number) => string | undefined;
 
 /**
+ * この枠を「出場しない」として空けてよいか。
+ * 競技設定が欠員を許可していても、フォームに登録状態の質問が無い枠は空けられない。
+ * 空けると`REQUIRED_SLOT_MISSING`のエラーになり、避けたい問題より重くなる。
+ */
+export function canLeaveVacant(slot: MockSlot): boolean {
+  return slot.vacancyAllowed && !slot.required;
+}
+
+/**
  * ルール設定の論理式を満たすように、疑似データの選手を割り当てる。
  * 論理式の意味は解釈せず、「候補を仮に入れて論理式を評価する」ことだけで判断する。
  * どうしても満たせないルールがあっても止めず、満たせなかったルールを返す。
@@ -82,8 +91,9 @@ export function assignMockStudents(input: MockAssignmentInput): MockAssignmentRe
   const assigned: string[] = input.slots.map(() => '');
   const decided: boolean[] = input.slots.map(() => false);
   const readId: SlotStudentIdReader = (index) => (decided[index] ? assigned[index] : undefined);
+  const itemCache = slotItemCache(input.slots);
   const holds = (scope: RuleScope, reader: SlotStudentIdReader): boolean =>
-    scopeHolds(scope, reader, input.slots, submission, studentsById);
+    scopeHolds(scope, reader, itemCache, submission, studentsById);
 
   const usedByEvent = new Map<string, Set<string>>();
   const usageByStudent = new Map<string, number>();
@@ -93,11 +103,11 @@ export function assignMockStudents(input: MockAssignmentInput): MockAssignmentRe
     return used;
   };
 
-  // 欠員を許可していない枠から先に、そして関係するルールが多い枠から先に決める。
+  // 空けられない枠から先に、そして関係するルールが多い枠から先に決める。
   const order = input.slots
     .map((slot, index) => ({ slot, index }))
     .sort((left, right) =>
-      Number(left.slot.vacancyAllowed) - Number(right.slot.vacancyAllowed)
+      Number(canLeaveVacant(left.slot)) - Number(canLeaveVacant(right.slot))
       || (scopesBySlot[right.index]?.length ?? 0) - (scopesBySlot[left.index]?.length ?? 0)
       || left.index - right.index);
 
@@ -147,9 +157,10 @@ export function findRuleViolationCandidates(
   const scopes = allScopes.filter((scope) => scope.rule.judgment === judgment);
   if (scopes.length === 0) return [];
   const ordered = scopes.map((_, offset) => scopes[(ruleOffset + offset) % scopes.length]!);
+  const itemCache = slotItemCache(input.slots);
   const cleanReader: SlotStudentIdReader = (index) => studentIds[index];
   const heldBefore = new Set(allScopes
-    .filter((scope) => scopeHolds(scope, cleanReader, input.slots, submission, studentsById)));
+    .filter((scope) => scopeHolds(scope, cleanReader, itemCache, submission, studentsById)));
   const found: MockViolationCandidate[] = [];
 
   for (const target of ordered) {
@@ -161,10 +172,10 @@ export function findRuleViolationCandidates(
       for (const replacement of replacementIds(input, studentIds, target, slotIndex, studentsById)) {
         const reader: SlotStudentIdReader = (index) =>
           (index === slotIndex ? replacement : studentIds[index]);
-        if (scopeHolds(target, reader, input.slots, submission, studentsById)) continue;
+        if (scopeHolds(target, reader, itemCache, submission, studentsById)) continue;
         const sideEffectCount = allScopes
           .filter((scope) => scope !== target && heldBefore.has(scope)
-            && !scopeHolds(scope, reader, input.slots, submission, studentsById))
+            && !scopeHolds(scope, reader, itemCache, submission, studentsById))
           .length;
         found.push({
           slotIndex,
@@ -267,7 +278,12 @@ function repairAssignment(context: RepairContext): void {
       if (budget <= 0) return;
       const swapped = repairBySwap(context, target, budget);
       budget -= swapped.evaluations;
-      if (swapped.improved) improved = true;
+      if (swapped.improved) { improved = true; continue; }
+      if (budget <= 0) return;
+      // 生徒の組み替えでは直らないときの最後の手段として、欠員許可の枠を空ける。
+      const vacated = repairByVacancy(context, target, budget);
+      budget -= vacated.evaluations;
+      if (vacated.improved) improved = true;
     }
     const failingNow = countFailing(context);
     if (failingNow < bestFailing) {
@@ -294,29 +310,104 @@ function repairByReplacement(
   let evaluations = 0;
   for (const slotIndex of target.slotIndexes) {
     const slot = input.slots[slotIndex];
-    if (!slot || !assigned[slotIndex]) continue;
+    if (!slot) continue;
     const affected = scopesBySlot[slotIndex] ?? [];
     const before = affected.filter((scope) => holds(scope, readId)).length;
     evaluations += affected.length;
     const used = usedByEvent.get(slot.eventId) ?? new Set<string>();
-    const previous = assigned[slotIndex]!;
-    for (const candidate of input.classStudents) {
+    // 空いている枠も対象にする。`N >= 36`のように登録人数を増やさないと直せないルールがある。
+    const previous = assigned[slotIndex] ?? '';
+    // 生徒を全部試してから、最後に「空ける」案を試す。埋められる枠は空けない。
+    const replacements = [
+      ...input.classStudents.map((student) => student.studentId),
+      ...(canLeaveVacant(slot) ? [''] : []),
+    ];
+    for (const replacement of replacements) {
       if (evaluations >= budget) return { improved: false, evaluations };
-      if (candidate.studentId === previous || used.has(candidate.studentId)) continue;
-      assigned[slotIndex] = candidate.studentId;
+      if (replacement === previous || (replacement !== '' && used.has(replacement))) continue;
+      assigned[slotIndex] = replacement;
       const after = affected.filter((scope) => holds(scope, readId)).length;
       evaluations += affected.length;
       if (after > before) {
-        used.delete(previous);
-        used.add(candidate.studentId);
-        usageByStudent.set(previous, Math.max(0, (usageByStudent.get(previous) ?? 1) - 1));
-        usageByStudent.set(candidate.studentId, (usageByStudent.get(candidate.studentId) ?? 0) + 1);
+        if (previous !== '') {
+          used.delete(previous);
+          usageByStudent.set(previous, Math.max(0, (usageByStudent.get(previous) ?? 1) - 1));
+        }
+        if (replacement !== '') {
+          used.add(replacement);
+          usageByStudent.set(replacement, (usageByStudent.get(replacement) ?? 0) + 1);
+        }
         return { improved: true, evaluations };
       }
       assigned[slotIndex] = previous;
     }
   }
   return { improved: false, evaluations };
+}
+
+/**
+ * 生徒の組み替えでは直らないルールを、欠員を許可した枠を空けて直す。
+ * 全部の枠が決まったあとに数えるので、途中の集計に引きずられて空けすぎることはない。
+ * 1枠空けただけでは直らないルール（39人のクラスで44枠を`MAX_PER_STUDENT <= 1`にする等）が
+ * あるため、対象のルールが成立するまで続けて空け、まとめて採用する。
+ * ほかのルールを崩す枠は空けず、全体の不成立ルールが減らなければ全部元に戻す。
+ */
+function repairByVacancy(
+  context: RepairContext,
+  target: RuleScope,
+  budget: number,
+): { improved: boolean; evaluations: number } {
+  const { input, assigned, usedByEvent, usageByStudent, scopes, holds, readId } = context;
+  const remaining = new Set(target.slotIndexes
+    .filter((index) => assigned[index] && canLeaveVacant(input.slots[index]!)));
+  if (remaining.size === 0) return { improved: false, evaluations: 0 };
+  const before = countFailing(context);
+  let evaluations = scopes.length;
+  const emptied: Array<{ index: number; studentId: string }> = [];
+
+  while (remaining.size > 0 && evaluations < budget) {
+    evaluations += 1;
+    if (holds(target, readId)) break;
+    const index = nextSlotToEmpty(context, target, remaining);
+    remaining.delete(index);
+    const studentId = assigned[index]!;
+    assigned[index] = '';
+    evaluations += scopes.length;
+    // 空けたことでほかのルールが崩れる枠は空けない。
+    if (countFailing(context) > before) { assigned[index] = studentId; continue; }
+    emptied.push({ index, studentId });
+  }
+
+  evaluations += scopes.length;
+  if (emptied.length > 0 && holds(target, readId) && countFailing(context) < before) {
+    emptied.forEach(({ index, studentId }) => {
+      usedByEvent.get(input.slots[index]!.eventId)?.delete(studentId);
+      usageByStudent.set(studentId, Math.max(0, (usageByStudent.get(studentId) ?? 1) - 1));
+    });
+    return { improved: true, evaluations };
+  }
+  emptied.forEach(({ index, studentId }) => { assigned[index] = studentId; });
+  return { improved: false, evaluations };
+}
+
+/**
+ * 次に空けてみる枠。同じルールの中で何度も出ている生徒の枠から先に空ける。
+ * 論理式の意味は読まず、「重なっている枠から減らす」という数え方だけで決める。
+ */
+function nextSlotToEmpty(
+  context: RepairContext,
+  target: RuleScope,
+  remaining: Set<number>,
+): number {
+  const { assigned } = context;
+  const usage = new Map<string, number>();
+  target.slotIndexes.forEach((index) => {
+    const studentId = assigned[index];
+    if (studentId) usage.set(studentId, (usage.get(studentId) ?? 0) + 1);
+  });
+  return [...remaining].sort((left, right) =>
+    (usage.get(assigned[right]!) ?? 0) - (usage.get(assigned[left]!) ?? 0)
+    || right - left)[0]!;
 }
 
 /**
@@ -411,11 +502,13 @@ function repairByResolve(
   for (let seed = 0; seed < RESOLVE_SEED_LIMIT; seed += 1) {
     let filledAll = true;
     slotIndexes.forEach((index, position) => {
+      const allowVacancy = canLeaveVacant(input.slots[index]!);
       const candidates = orderedCandidates(input, eventUsers(index), usageByStudent, position);
       if (candidates.length === 0) {
         assigned[index] = '';
         decided[index] = true;
-        filledAll = false;
+        // 空けてよい枠なら、空いたままでも組み直しは成功とみなす。
+        if (!allowVacancy) filledAll = false;
         return;
       }
       // 先頭の枠だけ候補の順番をずらして、組全体の顔ぶれを変える。
@@ -479,6 +572,8 @@ interface SlotChoiceInput {
 /**
  * 1つの枠に入れる生徒を決める。今まで成立しているルールを崩さない候補を優先し、
  * どれも崩してしまう場合は、いちばん多くのルールが成立する候補を選ぶ。
+ * ここでは枠を空けない。まだ決めていない枠があるため、
+ * 「空ければ成立する」の判断が途中の集計に引きずられるため。空けるのは`repairByVacancy`で行う。
  */
 function chooseForSlot(choice: SlotChoiceInput): string {
   const { slotIndex, candidates, affected, assigned, decided, holds, readId } = choice;
@@ -514,10 +609,18 @@ function buildRuleScopes(slots: MockSlot[], rules: RuleSetting[]): RuleScope[] {
     .filter((scope) => scope.slotIndexes.length > 0);
 }
 
+/**
+ * 枠ごとの申請項目を使い回すための入れ物。
+ * 1件の割り当てで論理式を数万回評価するため、評価のたびに項目を作り直すと時間がかかる。
+ */
+function slotItemCache(slots: MockSlot[]): SubmissionItem[] {
+  return slots.map((slot, index) => slotItem(slot, index, ''));
+}
+
 function scopeHolds(
   scope: RuleScope,
   readId: SlotStudentIdReader,
-  slots: MockSlot[],
+  cache: SubmissionItem[],
   submission: Submission,
   studentsById: Map<string, Student>,
 ): boolean {
@@ -525,8 +628,12 @@ function scopeHolds(
   for (const index of scope.slotIndexes) {
     const studentId = readId(index);
     if (studentId === undefined) continue;
-    const slot = slots[index];
-    if (slot) items.push(slotItem(slot, index, studentId));
+    const item = cache[index];
+    if (!item) continue;
+    item.studentIdInput = studentId;
+    item.normalizedStudentId = studentId;
+    item.registrationState = studentId ? 'REGISTER' : 'NOT_PARTICIPATING';
+    items.push(item);
   }
   if (items.length === 0) return true;
   // 論理式が壊れていて判定できないときは、割り当てでは直せないので成立扱いにする。

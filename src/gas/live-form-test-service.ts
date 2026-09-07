@@ -629,6 +629,17 @@ export function collectLiveFormTestResults(): LiveFormTestCollectResult {
 }
 
 export function cleanupLiveFormTest(): LiveFormTestCleanupResult {
+  // テスト申請を消している途中に本物の回答が届くと、行番号がずれて別の申請を消しかねない。
+  const lock = LockService.getDocumentLock();
+  if (!lock.tryLock(30_000)) throw new Error('ほかの担当者が処理中です。少し待ってから、もう一度実行してください。');
+  try {
+    return cleanupLiveFormTestWithinLock();
+  } finally {
+    lock.releaseLock();
+  }
+}
+
+function cleanupLiveFormTestWithinLock(): LiveFormTestCleanupResult {
   assertAuthorized();
   const target = sheet();
   const rows = readRows();
