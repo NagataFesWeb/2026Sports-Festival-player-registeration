@@ -64,6 +64,8 @@ npm run build
 
 `dist/`にclaspへ送るGASファイルが生成されます。実在データを含まないテスト用のスプレッドシートと、テスト専用Apps Scriptプロジェクトを用意してください。
 
+入口関数ごとの実行時間は、Apps Scriptエディタの「実行数」で各実行のログに`[実行時間] 関数名 1234ms`として残ります。関数名とミリ秒だけを記録し、引数や氏名・学籍番号は記録しません。速さを比べるときは、練習用コピーで同じ操作を前後で行い、この値を見比べてください。
+
 ```powershell
 Copy-Item .clasp.json.example .clasp.json
 # .clasp.json の scriptId をテスト用Apps ScriptプロジェクトのIDへ変更
