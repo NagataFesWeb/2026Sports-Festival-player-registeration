@@ -25,6 +25,7 @@ import {
   resolveRuleTargetSelection,
   splitEventIds,
 } from '../core/settings';
+import { cachedSheetRows, cachedSheetValue, invalidateSheetCache } from './sheet-cache';
 
 type Value = string | number | boolean | Date;
 type Sheet = GoogleAppsScript.Spreadsheet.Sheet;
@@ -67,7 +68,17 @@ function ensure(name: string, headers: readonly string[]): Sheet {
     sheet.getRange(1, 1, 1, headers.length).setValues([[...headers]]).setFontWeight('bold');
     sheet.setFrozenRows(1);
   }
+  invalidateSettingsSheet(name);
   return sheet;
+}
+
+/**
+ * 設定シートの読み取りメモを捨てる。
+ * ルール設定の対象競技列は競技設定・フォーム設計の内容から作るので、どれを書き換えても
+ * ルール設定のメモ（列そろえ済みの印を含む）を一緒に捨てる。
+ */
+function invalidateSettingsSheet(...sheetNames: string[]): void {
+  invalidateSheetCache(...sheetNames, SHEETS.ruleSettings);
 }
 
 export function ensureSettingsSheets(): void {
@@ -107,6 +118,7 @@ export function ensureFormDesignRows(): void {
   ]) as Value[][];
   if (lastRow > 1) sheet.getRange(2, 1, lastRow - 1, 2).clearContent();
   sheet.getRange(2, 1, data.length, 2).setValues(data);
+  invalidateSettingsSheet(SHEETS.formDesign);
   applyFormDesignDeadlineValidation();
 }
 
@@ -130,6 +142,7 @@ export function seedDefaultSettings(): void {
       [2026, 'E003', true, '1年', '学年競技', '混合', 8, false, true, 30, 30, '疑似設定'],
       [2026, 'E004', true, '2年', '学年競技', '混合', 10, false, true, 40, 40, '疑似設定'],
     ]);
+    invalidateSettingsSheet(SHEETS.eventSettings);
   }
   const rules = book().getSheetByName(SHEETS.ruleSettings)!;
   if (rules.getLastRow() < 2) {
@@ -141,6 +154,7 @@ export function seedDefaultSettings(): void {
       ['R005', false, '女子のみ', '指定競技', '', '', '', 'エラー', '女子のみ登録できます', '対象競技を選んで有効にします', 'M == 0 && UNKNOWN == 0'],
       ['R006', false, '男女各2名以上', '指定競技', '', '', '', 'エラー', '男子・女子を各2名以上登録してください', '対象競技を選んで有効にします', 'M >= 2 && F >= 2'],
     ]);
+    invalidateSettingsSheet(SHEETS.ruleSettings);
   }
   const design = book().getSheetByName(SHEETS.formDesign)!;
   if (design.getLastRow() < 2) writeFormDesign(defaultFormDesign());
@@ -167,6 +181,19 @@ function legacyTargetIncludesEvent(row: Value[], event: EventSetting): boolean {
 }
 
 /** 競技設定の有効競技を、ルール設定の複数選択チェックボックス列へ同期する。 */
+/**
+ * 同じ実行の中では列そろえを1回だけ行う。
+ * 列そろえはルール設定シートへ毎回書き込むため、読むたびに実行すると承認1件で何度も往復する。
+ * 競技設定・フォーム設計・ルール設定のどれかを書き換えると印ごとメモが捨てられ、次に読むときに
+ * もう一度そろえる。
+ */
+function syncRuleEventCheckboxesOnce(): void {
+  cachedSheetValue(SHEETS.ruleSettings, 'eventColumnsSynced', () => {
+    syncRuleEventCheckboxes();
+    return true;
+  });
+}
+
 export function syncRuleEventCheckboxes(): void {
   const sheet = book().getSheetByName(SHEETS.ruleSettings) ?? ensure(SHEETS.ruleSettings, RULE_SETTING_HEADERS);
   const design = readFormDesign();
@@ -200,11 +227,14 @@ export function syncRuleEventCheckboxes(): void {
     return [...fixed, ...selections];
   });
   const headers = [...RULE_SETTING_HEADERS, ...events.map(targetEventHeader)];
+  // ここから先はシートを書き換える。途中で失敗しても古い内容のメモを使わないよう、先に捨てる。
+  invalidateSettingsSheet(SHEETS.ruleSettings);
   sheet.getRange(1, 1, 1, headers.length).setValues([headers]).setFontWeight('bold');
   if (newRows.length > 0) sheet.getRange(2, 1, newRows.length, headers.length).setValues(newRows);
   if (oldWidth > headers.length) {
     sheet.getRange(1, headers.length + 1, Math.max(1, sheet.getMaxRows()), oldWidth - headers.length).clear();
   }
+  invalidateSettingsSheet(SHEETS.ruleSettings);
   if (events.length > 0) {
     const checkboxRows = Math.max(sheet.getMaxRows() - 1, 1);
     sheet.getRange(2, RULE_SETTING_HEADERS.length + 1, checkboxRows, events.length)
@@ -274,6 +304,7 @@ function applyFormDesignDeadlineValidation(): void {
     const parts = parseCalendarDate(cell.getValue());
     if (parts && !(cell.getValue() instanceof Date)) {
       cell.setValue(new Date(parts.year, parts.month - 1, parts.day));
+      invalidateSettingsSheet(SHEETS.formDesign);
     }
     cell.setDataValidation(
       SpreadsheetApp.newDataValidation().requireDate().setAllowInvalid(false)
@@ -354,10 +385,13 @@ const RULE_EXPRESSION_NOTE = [
   '入力後は「設定を点検」を実行すると、式の間違いを行番号付きで知らせます。',
 ].join('\n');
 
+/** データ行を`getValues()`で読む。同じ実行内の2回目以降はメモから返す（毎回コピー）。 */
 function rows(sheetName: string, width: number): Value[][] {
-  const sheet = book().getSheetByName(sheetName);
-  if (!sheet || sheet.getLastRow() < 2) return [];
-  return sheet.getRange(2, 1, sheet.getLastRow() - 1, width).getValues() as Value[][];
+  return cachedSheetRows<Value>(sheetName, `values:${width}`, () => {
+    const sheet = book().getSheetByName(sheetName);
+    if (!sheet || sheet.getLastRow() < 2) return [];
+    return sheet.getRange(2, 1, sheet.getLastRow() - 1, width).getValues() as Value[][];
+  });
 }
 
 /** シート上の行番号を保ったまま値を読む。未使用行を除外しても行番号がずれない。 */
@@ -382,10 +416,13 @@ export function readEventSettings(): EventSetting[] {
 }
 
 export function readRuleSettings(): RuleSetting[] {
-  syncRuleEventCheckboxes();
-  const sheet = book().getSheetByName(SHEETS.ruleSettings)!;
-  const width = sheet.getLastColumn();
-  const headers = sheet.getRange(1, 1, 1, width).getDisplayValues()[0] ?? [];
+  syncRuleEventCheckboxesOnce();
+  const headers = cachedSheetRows<string>(SHEETS.ruleSettings, 'header', () => {
+    const sheet = book().getSheetByName(SHEETS.ruleSettings)!;
+    const width = sheet.getLastColumn();
+    return [sheet.getRange(1, 1, 1, width).getDisplayValues()[0] ?? []];
+  })[0] ?? [];
+  const width = headers.length;
   const availableEventIds = headers.slice(RULE_SETTING_HEADERS.length).map(targetEventIdFromHeader).filter(Boolean);
   return numberedRows(SHEETS.ruleSettings, width)
     .filter(({ row }) => hasRuleConfigInput(row))
@@ -457,6 +494,7 @@ export function writeFormDesign(value: FormDesignSetting): void {
   const values = formDesignSheetValues(value);
   const data = FORM_DESIGN_ROW_ORDER.map((key) => [key, values[key] ?? '']) as Value[][];
   sheet.getRange(2, 1, data.length, 2).setValues(data);
+  invalidateSettingsSheet(SHEETS.formDesign);
   applyFormDesignDeadlineValidation();
 }
 
@@ -472,6 +510,7 @@ export function replaceSettingsIssues(issues: SettingsIssue[]): void {
     issue.category, issue.severity === 'ERROR' ? 'エラー' : '警告', issue.targetId,
     issue.rowNumber || '', issue.title, issue.instruction,
   ]));
+  invalidateSheetCache(SHEETS.settingsIssues);
 }
 
 export function appendFormRegistry(values: FormRegistryRow[]): void {
@@ -480,6 +519,7 @@ export function appendFormRegistry(values: FormRegistryRow[]): void {
     value.formType, value.formId, value.itemId, value.fieldKey, value.eventId,
     value.title, value.itemType, value.displayOrder, value.enabled,
   ]));
+  invalidateSheetCache(SHEETS.formRegistry);
 }
 
 export function readFormRegistry(formId: string): FormRegistryRow[] {
@@ -500,8 +540,10 @@ export function readManagedFormIds(): string[] {
   )];
 }
 
+/** ほかのモジュールへSheetを渡す入口。渡した先で何を書くか分からないので、先にメモを捨てる。 */
 export function getSettingsSheet(name: string): Sheet {
   const sheet = book().getSheetByName(name);
   if (!sheet) throw new Error(`「${name}」シートがありません。開発用の疑似データを作り直してください。`);
+  invalidateSettingsSheet(name);
   return sheet;
 }

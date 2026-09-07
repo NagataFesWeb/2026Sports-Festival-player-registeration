@@ -10,6 +10,7 @@ import {
 } from '../core/system-mode';
 import {
   getSystemMode,
+  invalidateSystemModeCache,
   isPracticeWorkbook,
   isProductionMode,
   systemConfigRows,
@@ -38,15 +39,20 @@ export function writeSystemMode(mode: SystemMode): void {
   const local = spreadsheet.getSheetByName(SHEETS.systemConfig)
     ?? spreadsheet.insertSheet(SHEETS.systemConfig);
   const rows = upsertSystemConfigRows(systemConfigRows(), SYSTEM_CONFIG_KEYS.mode, mode);
-  local.getRange(1, 1, 1, SYSTEM_CONFIG_HEADERS.length).setValues([[...SYSTEM_CONFIG_HEADERS]]);
-  local.getRange(2, 1, rows.length, 2).setValues(rows);
-  local.hideSheet();
-  const properties = PropertiesService.getScriptProperties();
-  if (mode === 'PRODUCTION') {
-    properties.setProperty(SCRIPT_PROPERTIES.systemMode, 'PRODUCTION');
-    return;
+  try {
+    local.getRange(1, 1, 1, SYSTEM_CONFIG_HEADERS.length).setValues([[...SYSTEM_CONFIG_HEADERS]]);
+    local.getRange(2, 1, rows.length, 2).setValues(rows);
+    local.hideSheet();
+    const properties = PropertiesService.getScriptProperties();
+    if (mode === 'PRODUCTION') {
+      properties.setProperty(SCRIPT_PROPERTIES.systemMode, 'PRODUCTION');
+      return;
+    }
+    properties.deleteProperty(SCRIPT_PROPERTIES.systemMode);
+  } finally {
+    // 途中で失敗しても、古いモードのメモを使わない。
+    invalidateSystemModeCache();
   }
-  properties.deleteProperty(SCRIPT_PROPERTIES.systemMode);
 }
 
 export function getPracticeRootFolderId(): string {

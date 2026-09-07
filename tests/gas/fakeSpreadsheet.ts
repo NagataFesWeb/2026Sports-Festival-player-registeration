@@ -55,6 +55,34 @@ export class FakeRange {
     return this;
   }
 
+  getValue(): FakeCell {
+    return this.getValues()[0]?.[0] ?? '';
+  }
+
+  getRow(): number { return this.row; }
+  getColumn(): number { return this.column; }
+
+  clear(): FakeRange { return this.clearContent(); }
+
+  // 書式・入力規則・メモは値へ影響しないので、何もせず自身を返す。
+  setFontWeight(): FakeRange { return this; }
+  setFontSize(): FakeRange { return this; }
+  setFontColor(): FakeRange { return this; }
+  setBackground(): FakeRange { return this; }
+  setBackgrounds(): FakeRange { return this; }
+  setWrap(): FakeRange { return this; }
+  setHorizontalAlignment(): FakeRange { return this; }
+  setVerticalAlignment(): FakeRange { return this; }
+  setNumberFormat(): FakeRange { return this; }
+  setNote(): FakeRange { return this; }
+  setDataValidation(): FakeRange { return this; }
+  clearDataValidations(): FakeRange { return this; }
+  setBorder(): FakeRange { return this; }
+  setFormula(): FakeRange { return this; }
+  mergeAcross(): FakeRange { return this; }
+  merge(): FakeRange { return this; }
+  breakApart(): FakeRange { return this; }
+
   private slice(): FakeCell[][] {
     const result: FakeCell[][] = [];
     for (let r = 0; r < this.rowCount; r += 1) {
@@ -124,7 +152,30 @@ export class FakeSheet {
     return this;
   }
 
+  getDataRange(): FakeRange {
+    return new FakeRange(this, 1, 1, Math.max(1, this.getLastRow()), Math.max(1, this.getLastColumn()));
+  }
+
+  insertColumnBefore(column: number): FakeSheet {
+    this.writes += 1;
+    const moved = new Map<string, FakeCell>();
+    for (const [key, value] of this.cells) {
+      const [r, c] = key.split(':').map(Number) as [number, number];
+      moved.set(`${r}:${c >= column ? c + 1 : c}`, value);
+    }
+    this.cells.clear();
+    moved.forEach((value, key) => this.cells.set(key, value));
+    return this;
+  }
+
   setFrozenRows(): FakeSheet { return this; }
+  setFrozenColumns(): FakeSheet { return this; }
+  setColumnWidth(): FakeSheet { return this; }
+  setColumnWidths(): FakeSheet { return this; }
+  setRowHeight(): FakeSheet { return this; }
+  setRowHeights(): FakeSheet { return this; }
+  hideColumns(): FakeSheet { return this; }
+  hideSheet(): FakeSheet { return this; }
   activate(): FakeSheet { return this; }
 
   /** テストの確認用。データ行だけを2次元配列にする。 */
@@ -167,6 +218,18 @@ export class FakeSpreadsheet {
   }
 
   setActiveSheet(): void { /* 画面操作は再現しない */ }
+  setSpreadsheetTimeZone(): FakeSpreadsheet { return this; }
+  setSpreadsheetLocale(): FakeSpreadsheet { return this; }
+}
+
+/** `SpreadsheetApp.newDataValidation()`の偽物。どのメソッドも自身を返し、`build()`は空オブジェクトを返す。 */
+function fakeDataValidationBuilder(): Record<string, unknown> {
+  const builder: Record<string, unknown> = {};
+  ['requireCheckbox', 'requireDate', 'requireValueInList', 'requireNumberBetween',
+    'requireFormulaSatisfied', 'setAllowInvalid', 'setHelpText']
+    .forEach((name) => { builder[name] = (): Record<string, unknown> => builder; });
+  builder.build = (): Record<string, never> => ({});
+  return builder;
 }
 
 /** `SpreadsheetApp`をこの偽物へ差し替えたときのグローバル値。 */
@@ -174,5 +237,6 @@ export function fakeSpreadsheetApp(book: FakeSpreadsheet): Record<string, unknow
   return {
     getActiveSpreadsheet: (): FakeSpreadsheet => book,
     flush: (): void => { /* 何もしない */ },
+    newDataValidation: (): Record<string, unknown> => fakeDataValidationBuilder(),
   };
 }
