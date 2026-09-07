@@ -222,11 +222,40 @@ export function ruleTargetItems(items: SubmissionItem[], rule: RuleSetting): Sub
     || (rule.target === '個人種目' && !item.eventName.includes('リレー')));
 }
 
+interface ClassRosterSize { size: number; male: number; female: number }
+
+/**
+ * 対象クラスの名簿人数。同じ名簿（Map）に対して何度も数え直さないよう、Mapごとにメモする。
+ * 疑似データ作成は同じ名簿で論理式を何万回も判定するため、毎回名簿全体を走査すると遅い。
+ */
+const CLASS_ROSTER_SIZE_CACHE = new WeakMap<Map<string, unknown>, Map<string, ClassRosterSize>>();
+
+function classRosterSize(
+  submission: Submission,
+  studentsById: Map<string, ValidationContext['students'][number]>,
+): ClassRosterSize {
+  let byClass = CLASS_ROSTER_SIZE_CACHE.get(studentsById);
+  if (!byClass) {
+    byClass = new Map();
+    studentsById.forEach((student) => {
+      const key = `${student.grade}:${student.classNumber}`;
+      const current = byClass!.get(key) ?? { size: 0, male: 0, female: 0 };
+      current.size += 1;
+      if (student.gender === 'M') current.male += 1;
+      if (student.gender === 'F') current.female += 1;
+      byClass!.set(key, current);
+    });
+    CLASS_ROSTER_SIZE_CACHE.set(studentsById, byClass);
+  }
+  return byClass.get(`${submission.targetGrade}:${submission.targetClass}`) ?? { size: 0, male: 0, female: 0 };
+}
+
 function expressionValues(
   submission: Submission,
   items: SubmissionItem[],
   studentsById: Map<string, ValidationContext['students'][number]>,
 ): RuleExpressionValues {
+  const roster = classRosterSize(submission, studentsById);
   const registered = items.filter((item) => item.registrationState === 'REGISTER');
   const ids = registered.map((item) => item.normalizedStudentId).filter(Boolean);
   const counts = new Map<string, number>();
@@ -270,6 +299,9 @@ function expressionValues(
     NAME_MISMATCH: nameMismatch,
     CLASS_MISMATCH: classMismatch,
     PENDING: items.filter((item) => item.registrationState === 'PENDING').length,
+    CLASS_SIZE: roster.size,
+    CLASS_M: roster.male,
+    CLASS_F: roster.female,
   };
 }
 
@@ -360,8 +392,18 @@ export function unregisteredStudentText(
     .filter((student) => (onlyMale ? student.gender === 'M' : onlyFemale ? student.gender === 'F' : true))
     .sort((left, right) => left.attendanceNumber - right.attendanceNumber || left.studentId.localeCompare(right.studentId));
   const label = onlyMale ? '未登録の男子' : onlyFemale ? '未登録の女子' : '未登録の生徒';
-  if (missing.length === 0) return `\n${label}：なし（対象クラスの名簿にいる全員が登録済みです）`;
-  return `\n${label}（${missing.length}人）：`
+  const rosterCount = students.filter((student) =>
+    student.grade === submission.targetGrade && student.classNumber === submission.targetClass
+    && (onlyMale ? student.gender === 'M' : onlyFemale ? student.gender === 'F' : true)).length;
+  const registeredCount = rosterCount - missing.length;
+  const sizeVariable = onlyMale ? 'CLASS_M' : onlyFemale ? 'CLASS_F' : 'CLASS_SIZE';
+  const countVariable = onlyMale ? 'M' : onlyFemale ? 'F' : 'UNIQUE';
+  if (missing.length === 0) {
+    return `\n${label}：なし（対象クラスの名簿${rosterCount}人は全員登録済みです）。`
+      + `論理式が名簿の人数より多い人数を求めていないか確認してください。`
+      + `クラスの人数に合わせるなら、例：${countVariable} >= ${sizeVariable}`;
+  }
+  return `\n${label}（${missing.length}人。名簿${rosterCount}人のうち登録済み${registeredCount}人）：`
     + missing.map((student) => `${student.studentId} ${student.name}${genderMark(student)}`).join('、');
 }
 
@@ -384,7 +426,7 @@ function addExpressionRuleIssues(
     const values = expressionValues(submission, targetItems, studentsById);
     const valueText = `M=${values.M}, F=${values.F}, N=${values.N}, UNKNOWN=${values.UNKNOWN}, `
       + `EMPTY=${values.EMPTY}, UNIQUE=${values.UNIQUE}, MAX_PER_STUDENT=${values.MAX_PER_STUDENT}, `
-      + `MAX_PER_EVENT=${values.MAX_PER_EVENT}`;
+      + `MAX_PER_EVENT=${values.MAX_PER_EVENT}, CLASS_SIZE=${values.CLASS_SIZE}`;
     // 表示メッセージは複数のルールで同じ文になりうるので、どの行のルールかは
     // 必ず`rule_id`と`ルール名`の両方で示す。
     const ruleLabel = [rule.ruleId, rule.ruleName].map((value) => value.trim()).filter(Boolean).join('｜')

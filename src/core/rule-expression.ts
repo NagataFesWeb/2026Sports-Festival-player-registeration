@@ -1,6 +1,9 @@
 export const RULE_EXPRESSION_VARIABLES = [
   'M', 'F', 'N', 'UNKNOWN', 'EMPTY', 'REQUIRED_EMPTY', 'UNIQUE',
   'DUPLICATE', 'MAX_PER_STUDENT', 'MAX_PER_EVENT', 'INVALID_ID', 'NAME_MISMATCH', 'CLASS_MISMATCH', 'PENDING',
+  // 対象クラスの名簿から数える値。登録内容ではなく生徒マスターの人数なので、
+  // 「クラス全員を出す」を UNIQUE >= CLASS_SIZE のように書ける。
+  'CLASS_SIZE', 'CLASS_M', 'CLASS_F',
 ] as const;
 
 export type RuleExpressionVariable = typeof RULE_EXPRESSION_VARIABLES[number];
