@@ -82,6 +82,7 @@ import {
   updateValidatedItems,
   updateSubmission
 } from './repository';
+import { invalidateSheetCache } from './sheet-cache';
 
 export type { SubmissionAction } from '../core/workflow';
 
@@ -190,6 +191,8 @@ export function initializeDevelopmentWorkbookData(): DashboardData {
   // 申請・項目・回答原本を丸ごと作り直すので、取込トリガーと同時に動かさない。
   const lock = LockService.getDocumentLock();
   if (!lock.tryLock(30_000)) throw new Error('ほかの担当者が処理中です。少し待ってから、もう一度実行してください。');
+  // ロックを取った直後は、ほかの担当者やトリガーが書いた内容を必ず読み直す。
+  invalidateSheetCache();
   try {
     return createDevelopmentWorkbookData();
   } finally {
@@ -253,6 +256,8 @@ export function addDevelopmentMockCorrectionSubmissions(count: number): Addition
   }
   const lock = LockService.getDocumentLock();
   if (!lock.tryLock(30_000)) throw new Error('ほかの担当者が処理中です。少し待ってから、もう一度実行してください。');
+  // ロックを取った直後は、ほかの担当者やトリガーが書いた内容を必ず読み直す。
+  invalidateSheetCache();
   let beforeSubmissions: Submission[] = [];
   let beforeItems: SubmissionItem[] = [];
   let beforeRawResponses: ReturnType<typeof readRawFormResponses> = [];
@@ -313,6 +318,8 @@ export function addDevelopmentMockCorrectionSubmissions(count: number): Addition
 export function deleteDevelopmentWorkbookData(): DashboardData {
   const lock = LockService.getDocumentLock();
   if (!lock.tryLock(30_000)) throw new Error('ほかの担当者が処理中です。少し待ってから、もう一度実行してください。');
+  // ロックを取った直後は、ほかの担当者やトリガーが書いた内容を必ず読み直す。
+  invalidateSheetCache();
   try {
     assertAuthorized();
     assertDevelopmentMode();
@@ -329,6 +336,8 @@ export function deleteDevelopmentWorkbookData(): DashboardData {
 export function prepareRealFormTestData(): DashboardData {
   const lock = LockService.getDocumentLock();
   if (!lock.tryLock(30_000)) throw new Error('ほかの担当者が処理中です。少し待ってから、もう一度実行してください。');
+  // ロックを取った直後は、ほかの担当者やトリガーが書いた内容を必ず読み直す。
+  invalidateSheetCache();
   try {
     assertAuthorized();
     assertDevelopmentMode();
@@ -384,6 +393,8 @@ export function revalidateAllSubmissionsWithinLock(): DashboardData {
 export function revalidateAllSubmissions(): DashboardData {
   const lock = LockService.getDocumentLock();
   if (!lock.tryLock(30_000)) throw new Error('ほかの担当者が処理中です。少し待ってから、もう一度実行してください。');
+  // ロックを取った直後は、ほかの担当者やトリガーが書いた内容を必ず読み直す。
+  invalidateSheetCache();
   try {
     return revalidateAllSubmissionsWithinLock();
   } finally {
@@ -665,6 +676,8 @@ export function importCorrectionSlots(
   if (!lock.tryLock(15_000)) {
     throw new Error('ほかの担当者が処理中です。少し待ってから、もう一度操作してください。');
   }
+  // ロックを取った直後は、ほかの担当者やトリガーが書いた内容を必ず読み直す。
+  invalidateSheetCache();
   const restoreItems: SubmissionItem[] = [];
   const historyRows: number[] = [];
   let closedCorrection = false;
@@ -785,6 +798,8 @@ export function importCorrectionSlots(
 export function selectDuplicateSubmission(selectedSubmissionId: string): DuplicateSelectionResult {
   const lock = LockService.getDocumentLock();
   if (!lock.tryLock(15_000)) throw new Error('ほかの担当者が処理中です。少し待ってから、もう一度実行してください。');
+  // ロックを取った直後は、ほかの担当者やトリガーが書いた内容を必ず読み直す。
+  invalidateSheetCache();
   const historyRows: number[] = [];
   const originals: Submission[] = [];
   let rejectedCount = 0;
@@ -832,6 +847,8 @@ export function selectDuplicateSubmission(selectedSubmissionId: string): Duplica
 export function approveAllClearSubmissions(): BulkApprovalResult {
   const lock = LockService.getDocumentLock();
   if (!lock.tryLock(30_000)) throw new Error('ほかの担当者が処理中です。少し待ってから、もう一度実行してください。');
+  // ロックを取った直後は、ほかの担当者やトリガーが書いた内容を必ず読み直す。
+  invalidateSheetCache();
   const historyRows: number[] = [];
   const originals: Submission[] = [];
   let approvedCount = 0;
@@ -932,6 +949,8 @@ export function editSubmissionItem(
   if (!lock.tryLock(15_000)) {
     throw new Error('ほかの担当者が処理中です。少し待ってから、もう一度操作してください。');
   }
+  // ロックを取った直後は、ほかの担当者やトリガーが書いた内容を必ず読み直す。
+  invalidateSheetCache();
   let result: EditItemResult;
   try {
     const actorEmail = assertAuthorized();
@@ -1002,6 +1021,8 @@ export function performSubmissionAction(
   if (!lock.tryLock(15_000)) {
     throw new Error('ほかの担当者が処理中です。少し待ってから、もう一度操作してください。');
   }
+  // ロックを取った直後は、ほかの担当者やトリガーが書いた内容を必ず読み直す。
+  invalidateSheetCache();
   let historyRow = 0;
   let previous: Submission | undefined;
   let previousItems: SubmissionItem[] | undefined;

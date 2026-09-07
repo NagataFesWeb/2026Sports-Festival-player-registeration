@@ -65,6 +65,7 @@ import {
   isSettingsChangeActive,
   isSettingsProtected,
 } from './settings-change-service';
+import { invalidateSheetCache } from './sheet-cache';
 
 export interface DraftBuildResult {
   message: string;
@@ -273,6 +274,8 @@ export function buildDraftForms(buildMode: FormBuildMode = 'FORMS_API_V1'): Draf
   assertAuthorized();
   const lock = LockService.getDocumentLock();
   if (!lock.tryLock(30_000)) throw new Error('ほかの担当者が設定を処理中です。少し待ってから、もう一度実行してください。');
+  // ロックを取った直後は、ほかの担当者やトリガーが書いた内容を必ず読み直す。
+  invalidateSheetCache();
   try {
     const design = readFormDesign();
     if (design.formStatus === '公開前確認') {
@@ -334,6 +337,8 @@ export function continueDraftFormCreation(): void {
     scheduleFormBuildContinuation();
     return;
   }
+  // ロックを取った直後は、ほかの担当者やトリガーが書いた内容を必ず読み直す。
+  invalidateSheetCache();
   try {
     const job = loadFormBuildJob();
     if (!job || job.status !== 'RUNNING') {
@@ -398,6 +403,8 @@ export function cancelDraftFormCreation(): SettingsDashboardData {
   assertAuthorized();
   const lock = LockService.getDocumentLock();
   if (!lock.tryLock(30_000)) throw new Error('フォーム作成処理が動いています。少し待ってから取り消してください。');
+  // ロックを取った直後は、ほかの担当者やトリガーが書いた内容を必ず読み直す。
+  invalidateSheetCache();
   try {
     const job = loadFormBuildJob();
     clearFormBuildTriggers();
@@ -664,6 +671,8 @@ export function publishDraftForms(): PublishFormsResult {
   if (!lock.tryLock(30_000)) {
     throw new Error('ほかの担当者がフォームを処理中です。少し待ってから、もう一度実行してください。');
   }
+  // ロックを取った直後は、ほかの担当者やトリガーが書いた内容を必ず読み直す。
+  invalidateSheetCache();
   const published: GoogleAppsScript.Forms.Form[] = [];
   try {
     const design = readFormDesign();
@@ -735,6 +744,8 @@ export function discardPreparedForms(): DiscardDraftFormsResult {
   if (!lock.tryLock(30_000)) {
     throw new Error('ほかの担当者がフォームを処理中です。少し待ってから、もう一度実行してください。');
   }
+  // ロックを取った直後は、ほかの担当者やトリガーが書いた内容を必ず読み直す。
+  invalidateSheetCache();
   try {
     const design = readFormDesign();
     if (design.formStatus !== '公開前確認') {
